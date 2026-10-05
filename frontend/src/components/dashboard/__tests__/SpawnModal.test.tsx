@@ -123,9 +123,7 @@ describe('SpawnModal', () => {
     });
     fireEvent.click(initialize());
     expect(onSpawn.mock.calls[0][4]).toBe('auto');
-    fireEvent.change(screen.getByLabelText('Model'), {
-      target: { value: 'General Usage' },
-    });
+    fireEvent.click(screen.getByRole('option', { name: 'General Usage' }));
     fireEvent.click(initialize());
     expect(onSpawn.mock.calls[1][4]).toBe('General Usage');
   });
@@ -142,30 +140,33 @@ describe('SpawnModal', () => {
       onLoadModels,
     });
     expect(
-      await screen.findByText('3 models and combos available'),
+      await screen.findByRole('option', { name: 'claude/claude-opus-5' }),
     ).toBeInTheDocument();
     expect(onLoadModels).toHaveBeenCalledTimes(1);
-    const options = document.querySelectorAll('#session-model-options option');
-    expect(Array.from(options).map((o) => o.getAttribute('value'))).toEqual([
-      'auto',
-      'General Usage',
-      'claude/claude-opus-5',
-    ]);
-    fireEvent.change(screen.getByLabelText('Model'), {
-      target: { value: 'claude/claude-opus-5' },
-    });
+    expect(screen.getAllByRole('option')).toHaveLength(3);
+    fireEvent.click(
+      screen.getByRole('option', { name: 'claude/claude-opus-5' }),
+    );
     fireEvent.click(initialize());
     expect(onSpawn.mock.calls[0][4]).toBe('claude/claude-opus-5');
   });
 
-  it('blocks a typed model that is not in the list', () => {
-    const { onSpawn } = renderModal({ models: ['auto'], defaultModel: 'auto' });
-    fireEvent.change(screen.getByLabelText('Model'), {
-      target: { value: 'not-a-model' },
+  it('narrows the model list as the user types', () => {
+    renderModal({
+      models: ['auto', 'General Usage', 'claude/claude-opus-5'],
+      defaultModel: 'auto',
     });
-    expect(initialize()).toBeDisabled();
-    expect(screen.getByText('Pick one of the listed models')).toBeVisible();
-    expect(onSpawn).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'OPUS' },
+    });
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'claude/claude-opus-5',
+    ]);
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'zzz' },
+    });
+    expect(screen.queryAllByRole('option')).toHaveLength(0);
+    expect(screen.getByText(/No models match/)).toBeInTheDocument();
   });
 
   it('keeps the reported choices when the live fetch fails', async () => {

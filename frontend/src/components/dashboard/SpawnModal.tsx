@@ -135,9 +135,14 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per modal open
   }, []);
 
-  // The host only accepts a model it offered, so a typed
-  // name must match one of the choices exactly.
-  const modelValid = !models || models.includes(model);
+  // Filter models by search query (case-insensitive
+  // substring match), like the project list.
+  const [modelSearch, setModelSearch] = useState('');
+  const filteredModels = useMemo(() => {
+    const all = models || [];
+    const q = modelSearch.trim().toLowerCase();
+    return q ? all.filter((m) => m.toLowerCase().includes(q)) : all;
+  }, [models, modelSearch]);
   const showResume = supportsResumeProp ?? false;
 
   // A typed folder name takes over from the list selection:
@@ -225,8 +230,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
       models ? model : undefined,
     );
   };
-  const canInitialize =
-    (creatingNew || !!selectedProject) && !creating && modelValid;
+  const canInitialize = (creatingNew || !!selectedProject) && !creating;
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -378,34 +382,60 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               >
                 Model
               </label>
-              <input
-                id="session-model"
-                type="text"
-                list="session-model-options"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                onFocus={(e) => e.target.select()}
-                placeholder="Type to search models and combos..."
-                autoComplete="off"
-                spellCheck={false}
-                aria-invalid={!modelValid}
-                className={`w-full bg-slate-900 border rounded-lg py-2 px-4 text-sm font-mono text-slate-50 focus:outline-none transition-colors ${
-                  modelValid
-                    ? 'border-slate-700 focus:border-accent'
-                    : 'border-red-500'
-                }`}
-              />
-              <datalist id="session-model-options">
-                {models.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
+              <div className="relative">
+                <Search
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+                  size={14}
+                />
+                <input
+                  id="session-model"
+                  type="text"
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder="Search models and combos..."
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 pl-9 pr-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
+                />
+              </div>
+              <div
+                role="listbox"
+                aria-label="Models"
+                className="mt-1.5 max-h-40 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg"
+              >
+                {filteredModels.length === 0 ? (
+                  <p className="text-sm text-slate-500 px-3 py-2 italic">
+                    No models match &ldquo;{modelSearch}&rdquo;
+                  </p>
+                ) : (
+                  filteredModels.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="option"
+                      aria-selected={model === m}
+                      onClick={() => setModel(m)}
+                      className={`w-full text-left px-3 py-1.5 text-sm font-mono transition-colors ${
+                        model === m
+                          ? 'bg-accent/20 text-accent'
+                          : 'text-slate-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))
+                )}
+              </div>
               <p className="text-[10px] text-slate-500 mt-1 italic">
-                {modelsLoading
-                  ? 'Refreshing model list...'
-                  : !modelValid
-                    ? 'Pick one of the listed models'
-                    : `${models.length} models and combos available`}
+                {modelsLoading ? (
+                  'Refreshing model list...'
+                ) : (
+                  <>
+                    Selected:{' '}
+                    <code className="bg-slate-900 px-1 rounded">{model}</code>{' '}
+                    &middot; {filteredModels.length} of {models.length} shown
+                  </>
+                )}
               </p>
               {modelsError && (
                 <p role="alert" className="text-xs text-amber-400 mt-1">
