@@ -187,6 +187,51 @@ provisioning:
     - MY_AGENT_API_KEY
 ```
 
+## Model Picker
+
+A profile can let the user choose the model for each session. Add a
+`models` section and the spawn dialog shows a selector for that tool,
+for new and resumed sessions alike:
+
+```yaml
+models:
+  model_env: ANTHROPIC_MODEL   # variable the choice is exported as
+  default: auto                # used when the user picks nothing
+  static: [auto, auto/fast]    # names always offered
+  list_url: "http://host.containers.internal:20128/v1/combos"
+  auth_env: ANTHROPIC_AUTH_TOKEN   # profile env key with the Bearer token
+```
+
+`list_url` and `auth_env` are optional. When set, the daemon fetches
+more names at startup and on **Force Refresh**. The endpoint may return
+a JSON list or an object holding the list under `combos`, `data` or
+`models`; entries are strings or objects with a `name` or `id`. If the
+request fails, the static names are still offered and the dialog shows
+the reason. The daemon only accepts a model it offered.
+
+## OmniRoute
+
+The bundled `omniroute` profile runs Claude Code through a local
+[OmniRoute](https://github.com/diegosouzapw/OmniRoute) gateway, which
+distributes requests across providers. The spawn dialog lists
+OmniRoute's auto-routing names and the combos from its dashboard.
+
+1. Create an API key in the OmniRoute dashboard under **Endpoints**.
+2. Put it in `agent/profiles/omniroute.local.yaml` (keep this file out
+   of git):
+
+   ```yaml
+   env:
+     ANTHROPIC_AUTH_TOKEN: "<your key>"
+   ```
+
+3. Mount a config directory at `/root/.claude-omniroute` and rebuild
+   the daemon image.
+
+The key is baked into the image and visible to processes inside the
+container. Without it the tool still appears, and sessions fail with
+HTTP 401.
+
 ## Local Overrides
 
 Profile files in `agent/profiles/` are tracked by Git.

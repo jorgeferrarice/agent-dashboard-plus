@@ -94,11 +94,22 @@ RUN ARCH=$(uname -m) \
     && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
     && ln -s /opt/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
 
-# Install Antigravity CLI (agy) — Google's replacement for Gemini CLI.
-# The installer drops the Go binary to ~/.local/bin/agy; the symlink
-# puts it on the container's default PATH.
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
-    && ln -sf /root/.local/bin/agy /usr/local/bin/agy
+# Install Grok Build CLI. The installer drops the binary under
+# ~/.grok, which is shadowed at runtime by the host ~/.grok mount,
+# so copy it onto the container's default PATH.
+RUN curl -fsSL https://x.ai/cli/install.sh | bash \
+    && cp --remove-destination -L /root/.grok/bin/grok /usr/local/bin/grok \
+    && rm -f /usr/local/bin/agent \
+    && rm -rf /root/.grok
+
+# Install rtk so the `rtk hook <agent>` PreToolUse hooks from the
+# mounted host agent configs resolve inside the container.
+RUN case "$(uname -m)" in \
+        aarch64) RTK_TARGET=aarch64-unknown-linux-gnu ;; \
+        *) RTK_TARGET=x86_64-unknown-linux-musl ;; \
+    esac \
+    && curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/v0.51.0/rtk-${RTK_TARGET}.tar.gz" \
+        | tar -xz -C /usr/local/bin rtk
 
 # ── Agent tool installations (profile-driven) ─────
 {% if npm_packages %}

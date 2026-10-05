@@ -404,3 +404,54 @@ def test_cors_get_request():
         response.headers.get("access-control-allow-origin") == "http://localhost:8080"
     )
     assert response.headers.get("access-control-allow-credentials") == "true"
+
+
+def _online_host(name):
+    """Creates a host, marks it online and returns its ID."""
+    from backend.app import models
+
+    host_id = client.post(
+        "/hosts", json={"name": name, "host_token": f"{name}-token"}
+    ).json()["id"]
+    db = next(override_get_db())
+    db.query(models.Host).filter(models.Host.id == host_id).update({"status": "online"})
+    db.commit()
+    db.close()
+    return host_id
+
+
+def test_create_project_host_offline():
+    """Creating a folder on a host with no daemon connected returns 400."""
+    host_id = _online_host("folder-no-daemon")
+    r = client.post(f"/hosts/{host_id}/projects", json={"name": "x"})
+    assert r.status_code == 400
+
+
+def test_create_project_relays_daemon_answer(monkeypatch):
+    """The daemon's path is returned, and its refusal becomes a 400."""
+    from backend.app import socket
+
+    host_id = _online_host("folder-host")
+    monkeypatch.setitem(socket.host_sids, host_id, "sid-1")
+    answers = iter(
+        [
+            {"ok": True, "path": "/home/u/git/x"},
+            {"ok": False, "error": "A folder with that name already exists."},
+        ]
+    )
+    sent = []
+
+    async def fake_call(event, data, **kwargs):
+        sent.append((event, data, kwargs.get("to")))
+        return next(answers)
+
+    monkeypatch.setattr(socket.sio, "call", fake_call)
+
+    r = client.post(f"/hosts/{host_id}/projects", json={"name": "x", "git_init": True})
+    assert r.status_code == 200
+    assert r.json() == {"path": "/home/u/git/x"}
+    assert sent == [("create_project", {"name": "x", "git_init": True}, "sid-1")]
+
+    r = client.post(f"/hosts/{host_id}/projects", json={"name": "x"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "A folder with that name already exists."

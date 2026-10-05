@@ -1,0 +1,90 @@
+# Claude Code routed through a local OmniRoute gateway.
+#
+# OmniRoute (https://github.com/diegosouzapw/OmniRoute) receives
+# the LLM requests and distributes them across providers. The
+# session asks for a combo or an auto-routing name instead of a
+# provider model; the user picks it in the spawn dialog.
+#
+# The API key is NOT set here. Put it in a git-ignored companion
+# file, agent/profiles/omniroute.local.yaml, then rebuild the
+# daemon image:
+#
+#   env:
+#     ANTHROPIC_AUTH_TOKEN: "<key from OmniRoute > Endpoints>"
+#
+# The key is baked into the image and visible to processes in the
+# container. Without it, sessions start and fail with HTTP 401.
+name: omniroute
+display_name: Omniroute
+color: amber
+binary: claude
+
+commands:
+  new: ["claude"]
+  resume: ["bash", "-c", "claude --continue || claude"]
+
+env:
+  # Own config dir: keeps history and credentials apart from the
+  # OAuth login in ~/.claude.
+  CLAUDE_CONFIG_DIR: "/root/.claude-omniroute"
+  # Claude Code appends /v1/messages itself: use the root URL.
+  # host.containers.internal reaches a gateway bound to the
+  # container host's loopback.
+  ANTHROPIC_BASE_URL: "http://host.containers.internal:20128"
+  ANTHROPIC_AUTH_TOKEN: "missing-omniroute-key"
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"
+  CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+  OTEL_METRICS_EXPORTER: "otlp"
+  OTEL_LOGS_EXPORTER: "otlp"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "http/json"
+
+# Per-session model picker: OmniRoute's auto-routing names plus
+# the combos defined in its dashboard.
+models:
+  model_env: ANTHROPIC_MODEL
+  default: auto
+  static:
+    - auto
+    - auto/coding
+    - auto/fast
+    - auto/cheap
+    - auto/smart
+    - auto/offline
+  list_url: "http://host.containers.internal:20128/v1/combos"
+  auth_env: ANTHROPIC_AUTH_TOKEN
+
+mcp:
+  project_file: .mcp.json
+  user_files:
+    - ~/.claude-omniroute/.claude.json
+
+telemetry:
+  token_metrics:
+    - claude_code.token.usage
+  cost_metric: claude_code.cost.usage
+  activity_metrics:
+    - claude_code.tool.execution
+    - claude_code.tool
+  runtime_metric:
+    name: claude_code.active_time.total
+    unit: seconds
+
+permission_patterns:
+  - "Do you want to proceed"
+  - "\\u276f\\s+\\d+\\."
+  - "\\u2610"
+  - "Skip interview and plan"
+
+# Build-time provisioning metadata
+provisioning:
+  install:
+    npm:
+      - "@anthropic-ai/claude-code"
+  config_files:
+    - path: "/root/.claude-omniroute"
+      mkdir: true
+  verify: "claude --version"
+  mounts:
+    - host: "~/.claude-omniroute"
+      container: "/root/.claude-omniroute"
+      mode: rw

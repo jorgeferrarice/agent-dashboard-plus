@@ -22,6 +22,8 @@ import tempfile
 import termios
 import time
 from collections import deque
+import urllib.error
+import urllib.request
 from typing import Dict, Optional
 
 import socketio
@@ -48,6 +50,28 @@ _DEFAULT_PERMISSION_PATTERNS = [
     r"Continue\?",
     r"Proceed\?",
 ]
+
+# Directory names never scanned for projects, at any depth.
+# Dependency trees are huge and never hold a project a user
+# would start a session in.
+_SCAN_SKIP_ANYWHERE = frozenset({"node_modules"})
+
+# Directory names skipped only directly under a projects
+# root. These are the macOS home folders that hold system and
+# media data; scanning them is slow and lists nothing useful
+# when PROJECTS_ROOT is a home directory.
+_SCAN_SKIP_AT_ROOT = frozenset(
+    {"Library", "Applications", "Movies", "Music", "Pictures", "Public"}
+)
+
+# Names accepted for a project folder created from the UI: a
+# single path component that starts with a letter or digit.
+# This rejects empty names, path separators, "..", hidden
+# names and whitespace.
+_PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+
+# Seconds to wait for a profile's model list endpoint.
+_MODEL_LIST_TIMEOUT = 5
 
 # Seconds of idle output after a pattern match before
 # the status transitions to waiting_permission.
@@ -161,6 +185,18 @@ class HostDaemon:
         # below each PROJECTS_ROOT entry. Default of 6 covers
         # most GitLab org hierarchies without being unlimited.
         self.projects_depth = int(os.getenv("PROJECTS_DEPTH", "6"))
+        # Maximum depth below each root at which a plain
+        # directory (no .git) is listed as a project. The
+        # default of 0 lists git repositories only.
+        self.projects_folder_depth = int(os.getenv("PROJECTS_FOLDER_DEPTH", "0"))
+        # Projects from the last scan that are not git repos.
+        self.non_git_projects: list = []
+        # Directory where folders created from the UI are
+        # placed. Defaults to the first projects root.
+        self.new_projects_dir = os.getenv("NEW_PROJECTS_DIR", self.projects_root)
+        # Model names offered per tool at the last detection,
+        # used to validate the model named in a spawn request.
+        self._tool_models: Dict[str, list] = {}
         # Load agent profiles from YAML/JSON configs
         self.profiles = load_profiles()
         # Build OTLP metric lookup tables from profiles
@@ -242,6 +278,32 @@ class HostDaemon:
             # data, so the user gets an up-to-date list.
             await self.scan_and_report_projects()
 
+        @self.sio.on("create_project", namespace="/terminal")
+        async def on_create_project(data):
+            """Creates a project folder requested from the UI.
+
+            data: {'name': '...', 'git_init': bool}
+
+            Returns:
+                Acknowledgement dict: {'ok': True, 'path': ...}
+                or {'ok': False, 'error': '...'}.
+            """
+            data = data or {}
+            try:
+                path = self.create_project(data.get("name"), bool(data.get("git_init")))
+            except FileExistsError:
+                return {
+                    "ok": False,
+                    "error": "A folder with that name already exists.",
+                }
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            except (OSError, subprocess.SubprocessError) as e:
+                log.info(f"Failed to create project folder: {e}")
+                return {"ok": False, "error": "Could not create the folder."}
+            await self.scan_and_report_projects()
+            return {"ok": True, "path": path}
+
         @self.sio.on("terminal_resize", namespace="/terminal")
         async def on_terminal_resize(data):
             agent_id = data.get("sid")
@@ -293,6 +355,7 @@ class HostDaemon:
             use_worktree = data.get("use_worktree", False)
             cols = data.get("cols", 120)
             rows = data.get("rows", 40)
+            model = data.get("model")
             try:
                 await self.spawn_agent(
                     agent_id,
@@ -303,6 +366,7 @@ class HostDaemon:
                     use_worktree,
                     cols,
                     rows,
+                    model,
                 )
             except Exception as e:
                 log.info(f"Failed to spawn agent {agent_id}: {e}")
@@ -388,19 +452,32 @@ class HostDaemon:
                     pass
 
     def _scan_projects(self) -> list:
-        """Scans all PROJECTS_ROOT directories for git repos.
+        """Scans all PROJECTS_ROOT directories for projects.
+
+        A project is a git repository found up to
+        PROJECTS_DEPTH levels below a root, or any plain
+        directory up to PROJECTS_FOLDER_DEPTH levels below a
+        root that is not inside a git repository. Hidden
+        directories, dependency trees and the system folders
+        of a home directory are never scanned.
 
         Synchronous method intended to be called from an
         executor to avoid blocking the event loop. Iterates
         over all configured roots and returns absolute paths.
+        The subset of results that are not git repositories
+        is stored in ``self.non_git_projects`` as a side
+        effect, so the UI can disable git-only options.
 
         Returns:
             Sorted list of absolute project paths.
         """
         projects = []
+        non_git = []
         for scan_root in self.projects_roots:
             if not os.path.exists(scan_root):
                 continue
+            # Directories known to be a git repo or inside one.
+            in_repo = set()
             try:
                 for dirpath, dirs, _files in os.walk(scan_root):
                     rel_path = os.path.relpath(dirpath, scan_root)
@@ -408,13 +485,27 @@ class HostDaemon:
                     if depth > self.projects_depth:
                         dirs[:] = []
                         continue
-                    if ".git" in dirs:
-                        if rel_path != ".":
-                            projects.append(os.path.join(scan_root, rel_path))
-                        dirs[:] = [d for d in dirs if d != ".git"]
+                    is_git = ".git" in dirs
+                    inside_repo = os.path.dirname(dirpath) in in_repo
+                    if is_git or inside_repo:
+                        in_repo.add(dirpath)
+                    if rel_path != ".":
+                        if is_git:
+                            projects.append(dirpath)
+                        elif not inside_repo and depth <= self.projects_folder_depth:
+                            projects.append(dirpath)
+                            non_git.append(dirpath)
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not d.startswith(".")
+                        and d not in _SCAN_SKIP_ANYWHERE
+                        and not (depth == 0 and d in _SCAN_SKIP_AT_ROOT)
+                    ]
             except Exception as e:
                 log.info(f"Error scanning projects root {scan_root}: {e}")
         projects.sort()
+        self.non_git_projects = sorted(non_git)
         return projects
 
     async def update_projects_cache(self):
@@ -452,6 +543,106 @@ class HostDaemon:
                 return root
         return self.projects_roots[0]
 
+    def create_project(self, name, git_init: bool = False) -> str:
+        """Creates an empty project folder under NEW_PROJECTS_DIR.
+
+        The name comes from the UI and is untrusted: it must be
+        a single path component, so the folder can never land
+        outside NEW_PROJECTS_DIR. An existing folder is never
+        touched.
+
+        Args:
+            name: Folder name requested by the user.
+            git_init: If True, run ``git init`` in the new folder.
+
+        Returns:
+            Absolute path of the created folder.
+
+        Raises:
+            ValueError: If the name is not a valid folder name.
+            FileExistsError: If the folder already exists.
+            OSError: If the folder cannot be created.
+            subprocess.SubprocessError: If ``git init`` fails.
+        """
+        if not isinstance(name, str) or not _PROJECT_NAME_RE.fullmatch(name):
+            raise ValueError(
+                "Invalid folder name. Use letters, digits, '.', '_' or '-', "
+                "starting with a letter or digit."
+            )
+        path = os.path.join(self.new_projects_dir, name)
+        os.makedirs(self.new_projects_dir, exist_ok=True)
+        os.mkdir(path)
+        if git_init:
+            subprocess.run(
+                ["git", "init", path],
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        log.info(f"Created project folder {path} (git_init={git_init})")
+        return path
+
+    def _fetch_models(self, profile) -> tuple:
+        """Builds the model list offered for a profile.
+
+        Combines the profile's static names with the names
+        returned by its ``list_url`` endpoint, if any. The
+        endpoint may return a JSON list or an object holding
+        the list under ``combos``, ``data`` or ``models``;
+        each entry is a string or an object with a ``name``
+        or ``id``. Entries flagged ``isHidden`` are skipped.
+
+        A failing endpoint is not fatal: the static names are
+        still offered and the error is reported to the UI.
+
+        Args:
+            profile: AgentProfile with a ``models`` section.
+
+        Returns:
+            Tuple of (list of model names, error message or
+            None).
+        """
+        cfg = profile.models
+        names = list(cfg.static)
+        if cfg.default and cfg.default not in names:
+            names.insert(0, cfg.default)
+        if not cfg.list_url:
+            return names, None
+        headers = {"Accept": "application/json"}
+        token = profile.env.get(cfg.auth_env) if cfg.auth_env else None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        try:
+            # list_url comes from a profile file on disk, not
+            # from user input.
+            req = urllib.request.Request(cfg.list_url, headers=headers)
+            with urllib.request.urlopen(  # nosec B310
+                req, timeout=_MODEL_LIST_TIMEOUT
+            ) as resp:
+                payload = json.load(resp)
+        except urllib.error.HTTPError as e:
+            return names, f"Model list request failed (HTTP {e.code})."
+        except (OSError, ValueError) as e:
+            log.info(f"Model list fetch failed for {profile.name}: {e}")
+            return names, "Model list is unreachable."
+        if isinstance(payload, dict):
+            payload = next(
+                (
+                    payload[k]
+                    for k in ("combos", "data", "models")
+                    if isinstance(payload.get(k), list)
+                ),
+                [],
+            )
+        for item in payload if isinstance(payload, list) else []:
+            if isinstance(item, dict):
+                if item.get("isHidden"):
+                    continue
+                item = item.get("name") or item.get("id")
+            if isinstance(item, str) and item and item not in names:
+                names.append(item)
+        return names, None
+
     def _make_tool_info(self, profile) -> dict:
         """Builds a tool metadata dict from a profile for
         the available_tools payload sent to the frontend.
@@ -461,15 +652,28 @@ class HostDaemon:
 
         Returns:
             Dict with name, display_name, color,
-            supports_resume, and has_model fields.
+            supports_resume, and has_model fields, plus
+            models, default_model and models_error for
+            profiles that define a model picker.
         """
-        return {
+        info = {
             "name": profile.name,
             "display_name": profile.display_name,
             "color": profile.color or "slate",
             "supports_resume": profile.supports_resume,
             "has_model": bool(profile.telemetry.token_metrics),
         }
+        # Tools with a model picker also report the names the
+        # user may choose from. The list is remembered so a
+        # spawn request can only name a model offered here.
+        if profile.models and profile.models.model_env:
+            models, error = self._fetch_models(profile)
+            self._tool_models[profile.name] = models
+            info["models"] = models
+            info["default_model"] = profile.models.default
+            if error:
+                info["models_error"] = error
+        return info
 
     def _detect_available_tools(self) -> list:
         """Detects which agent CLI tools are installed and
@@ -565,6 +769,8 @@ class HostDaemon:
                 {
                     "projects_root": self.projects_roots,
                     "available_projects": projects,
+                    "non_git_projects": list(self.non_git_projects),
+                    "new_projects_dir": self.new_projects_dir,
                     "available_tools": tools,
                 },
                 namespace="/terminal",
@@ -738,6 +944,7 @@ class HostDaemon:
         use_worktree: bool = False,
         cols: int = 120,
         rows: int = 40,
+        model: Optional[str] = None,
     ):
         """Spawns a new process in a pseudo-terminal with environmental context.
 
@@ -753,7 +960,29 @@ class HostDaemon:
                           repo.
             cols: Initial terminal width in columns (default 120).
             rows: Initial terminal height in rows (default 40).
+            model: Model name for tools whose profile defines
+                   a model picker. Must be one of the names
+                   the daemon offered; defaults to the
+                   profile's default model.
+
+        Raises:
+            ValueError: If the model is not one the daemon
+                        offered for this tool.
         """
+        # Resolve the session model before anything is
+        # created. The name comes from the UI and is
+        # untrusted, so only names this daemon offered are
+        # accepted.
+        model_env = {}
+        model_cfg = getattr(self.profiles.get(tool), "models", None)
+        if model_cfg and model_cfg.model_env:
+            chosen = model or model_cfg.default
+            offered = self._tool_models.get(tool, [])
+            if chosen != model_cfg.default and chosen not in offered:
+                raise ValueError(f"Model {chosen!r} is not offered for {tool}.")
+            if chosen:
+                model_env[model_cfg.model_env] = chosen
+
         # Resolve full path (handles both absolute and relative from projects_root)
         full_path = project_dir
         if project_dir and not project_dir.startswith("/"):
@@ -981,6 +1210,7 @@ class HostDaemon:
                         .replace("{otlp_port}", str(self.otlp_port))
                         .replace("{agent_id}", agent_id)
                     )
+            env.update(model_env)
 
             # Inject sidecar PROMPT_COMMAND if the profile
             # defines one (e.g. bash telemetry collection).

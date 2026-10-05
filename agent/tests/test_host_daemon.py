@@ -10,6 +10,7 @@ E. get_git_info
 F. _detect_mcp_servers
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -19,6 +20,7 @@ import pytest
 import yaml
 
 from agent.host_daemon import HostDaemon, _split_utf8
+from agent.profiles import AgentProfile, ModelsConfig
 
 
 @pytest.fixture
@@ -1222,3 +1224,188 @@ class TestMultiRoot:
                 assert os.path.join(root2, "proj2") in projects
                 # All paths are absolute
                 assert all(os.path.isabs(p) for p in projects)
+
+
+# ── Project scan: exclusions and plain folders ──────────────
+
+
+def _daemon_with_env(**env):
+    """Builds a HostDaemon with the given environment overrides."""
+    with patch.dict(os.environ, env):
+        return HostDaemon("http://dummy:8000", "dummy")
+
+
+class TestScanProjectsFolders:
+    """Tests for scan exclusions and non-git folder listing."""
+
+    def test_skips_hidden_system_and_dependency_dirs(self, tmp_path):
+        """Repos under hidden, system or node_modules dirs are not listed."""
+        for rel in (
+            "proj",
+            ".cache/hidden",
+            "Library/sys",
+            "proj/node_modules/dep",
+        ):
+            os.makedirs(tmp_path / rel / ".git")
+        d = _daemon_with_env(PROJECTS_ROOT=str(tmp_path))
+        assert d._scan_projects() == [str(tmp_path / "proj")]
+
+    def test_system_dir_names_only_skipped_at_root(self, tmp_path):
+        """A folder named like a system dir is scanned below the root."""
+        os.makedirs(tmp_path / "work" / "Pictures" / ".git")
+        d = _daemon_with_env(PROJECTS_ROOT=str(tmp_path))
+        assert d._scan_projects() == [str(tmp_path / "work" / "Pictures")]
+
+    def test_plain_folders_not_listed_by_default(self, tmp_path):
+        """Without PROJECTS_FOLDER_DEPTH only git repos are projects."""
+        os.makedirs(tmp_path / "notes")
+        d = _daemon_with_env(PROJECTS_ROOT=str(tmp_path))
+        assert d._scan_projects() == []
+        assert d.non_git_projects == []
+
+    def test_plain_folders_listed_up_to_folder_depth(self, tmp_path):
+        """Plain folders are listed to the folder depth, git repos deeper."""
+        os.makedirs(tmp_path / "a" / "b" / "c")
+        os.makedirs(tmp_path / "a" / "b" / "repo" / ".git")
+        d = _daemon_with_env(PROJECTS_ROOT=str(tmp_path), PROJECTS_FOLDER_DEPTH="2")
+        a, b = str(tmp_path / "a"), str(tmp_path / "a" / "b")
+        repo = str(tmp_path / "a" / "b" / "repo")
+        assert d._scan_projects() == [a, b, repo]
+        assert d.non_git_projects == [a, b]
+
+    def test_folders_inside_a_repo_are_not_listed(self, tmp_path):
+        """A git repo's own subfolders are not separate projects."""
+        os.makedirs(tmp_path / "repo" / ".git")
+        os.makedirs(tmp_path / "repo" / "src")
+        d = _daemon_with_env(PROJECTS_ROOT=str(tmp_path), PROJECTS_FOLDER_DEPTH="2")
+        assert d._scan_projects() == [str(tmp_path / "repo")]
+        assert d.non_git_projects == []
+
+
+# ── Project folder creation ─────────────────────────────────
+
+
+class TestCreateProject:
+    """Tests for create_project name validation and creation."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", ".", "..", ".hidden", "a/b", "../up", "/abs", "has space", None, 7],
+    )
+    def test_rejects_invalid_names(self, tmp_path, name):
+        """Names that are not a single plain path component are refused."""
+        d = _daemon_with_env(NEW_PROJECTS_DIR=str(tmp_path))
+        with pytest.raises(ValueError):
+            d.create_project(name)
+        assert not os.listdir(tmp_path)
+
+    def test_creates_plain_folder(self, tmp_path):
+        """A valid name creates an empty folder without git."""
+        d = _daemon_with_env(NEW_PROJECTS_DIR=str(tmp_path / "git"))
+        path = d.create_project("my-app_1.0")
+        assert path == str(tmp_path / "git" / "my-app_1.0")
+        assert os.listdir(path) == []
+
+    def test_git_init_creates_repository(self, tmp_path):
+        """git_init=True leaves a .git directory in the new folder."""
+        d = _daemon_with_env(NEW_PROJECTS_DIR=str(tmp_path))
+        path = d.create_project("repo", git_init=True)
+        assert os.path.isdir(os.path.join(path, ".git"))
+
+    def test_existing_folder_is_refused_untouched(self, tmp_path):
+        """An existing folder raises and keeps its contents."""
+        (tmp_path / "taken").mkdir()
+        (tmp_path / "taken" / "keep.txt").write_text("x")
+        d = _daemon_with_env(NEW_PROJECTS_DIR=str(tmp_path))
+        with pytest.raises(FileExistsError):
+            d.create_project("taken", git_init=True)
+        assert os.listdir(tmp_path / "taken") == ["keep.txt"]
+
+
+# ── Model picker ────────────────────────────────────────────
+
+
+def _model_profile(**models):
+    """Builds a profile with a model picker for tests."""
+    cfg = {"model_env": "ANTHROPIC_MODEL", "default": "auto"}
+    cfg.update(models)
+    return AgentProfile(
+        name="router",
+        display_name="Router",
+        binary="true",
+        env={"TOKEN": "secret-token"},
+        models=ModelsConfig(**cfg),
+    )
+
+
+class _FakeResponse:
+    """Minimal context-manager stand-in for an HTTP response."""
+
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, *_args):
+        """Returns the JSON payload bytes."""
+        return self._payload
+
+
+class TestModelPicker:
+    """Tests for model listing and spawn-time model validation."""
+
+    def test_static_models_without_endpoint(self, daemon):
+        """Without list_url only the default and static names are offered."""
+        profile = _model_profile(static=["auto/fast"])
+        assert daemon._fetch_models(profile) == (["auto", "auto/fast"], None)
+
+    def test_fetch_merges_names_and_sends_bearer(self, daemon):
+        """Endpoint names are appended; hidden entries are skipped."""
+        profile = _model_profile(list_url="http://gw/v1/combos", auth_env="TOKEN")
+        payload = {
+            "combos": [
+                {"name": "General Usage"},
+                {"name": "Secret", "isHidden": True},
+                {"name": "auto"},
+            ]
+        }
+        with patch(
+            "agent.host_daemon.urllib.request.urlopen",
+            return_value=_FakeResponse(payload),
+        ) as urlopen:
+            models, error = daemon._fetch_models(profile)
+        assert models == ["auto", "General Usage"]
+        assert error is None
+        request = urlopen.call_args[0][0]
+        assert request.get_header("Authorization") == "Bearer secret-token"
+
+    def test_fetch_failure_keeps_static_models(self, daemon):
+        """An unreachable endpoint reports an error, not an exception."""
+        profile = _model_profile(list_url="http://gw/v1/combos")
+        with patch(
+            "agent.host_daemon.urllib.request.urlopen",
+            side_effect=OSError("refused"),
+        ):
+            models, error = daemon._fetch_models(profile)
+        assert models == ["auto"]
+        assert error == "Model list is unreachable."
+
+    def test_tool_info_reports_models(self, daemon):
+        """Tool info carries the offered models and the default."""
+        info = daemon._make_tool_info(_model_profile(static=["auto/fast"]))
+        assert info["models"] == ["auto", "auto/fast"]
+        assert info["default_model"] == "auto"
+        assert "models_error" not in info
+
+    def test_spawn_rejects_model_not_offered(self, daemon):
+        """A model the daemon never offered fails before anything runs."""
+        daemon.profiles["router"] = _model_profile()
+        daemon._tool_models["router"] = ["auto", "General Usage"]
+        with patch("agent.host_daemon.pty.fork") as fork:
+            with pytest.raises(ValueError, match="not offered"):
+                asyncio.run(daemon.spawn_agent("id-1", "router", model="evil; rm"))
+        fork.assert_not_called()

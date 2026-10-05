@@ -18,6 +18,11 @@ from . import database, models
 # Initialize the AsyncServer with ASGI support and CORS
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
+# Socket.IO session ID of each connected host daemon, keyed by
+# host ID. Needed for request/response calls to one daemon
+# (sio.call), which cannot be addressed to a room.
+host_sids = {}
+
 
 def _validate_session_cookie(environ):
     """Validate the Starlette session cookie from the ASGI scope.
@@ -100,6 +105,7 @@ async def connect(sid, environ, auth):
         # Join a room specific to this host's ID so we can send spawn commands to it
         room_name = f"host_{host.id}"
         await sio.enter_room(sid, room_name, namespace="/terminal")
+        host_sids[host.id] = sid
         print(
             f"Host Daemon connected: {host.name} (SID: {sid}) joined room: {room_name}"
         )
@@ -116,6 +122,10 @@ async def disconnect(sid):
     async with sio.session(sid, namespace="/terminal") as session:
         if session.get("is_host"):
             host_id = session.get("host_id")
+            # A reconnecting daemon may already have registered
+            # a newer SID; only drop the entry if it is ours.
+            if host_sids.get(host_id) == sid:
+                del host_sids[host_id]
             db = next(database.get_db())
             try:
                 host = db.query(models.Host).filter(models.Host.id == host_id).first()

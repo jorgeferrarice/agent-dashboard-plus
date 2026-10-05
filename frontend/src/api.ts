@@ -15,6 +15,13 @@ export interface ToolInfo {
   color?: string;
   supports_resume?: boolean;
   has_model?: boolean;
+  /** Model names the user may pick for a session. Present
+   *  only for tools whose profile defines a model picker. */
+  models?: string[];
+  /** Model used when the user picks none. */
+  default_model?: string;
+  /** Why the live model list could not be fetched. */
+  models_error?: string;
 }
 
 /**
@@ -40,6 +47,11 @@ export interface Host {
   projects?: {
     projects_root: string | string[];
     available_projects: string[];
+    /** Subset of available_projects that are plain folders,
+     *  not git repositories. */
+    non_git_projects?: string[];
+    /** Directory where folders created from the UI land. */
+    new_projects_dir?: string;
     available_tools?: (string | ToolInfo)[];
   };
 }
@@ -100,6 +112,7 @@ export const spawnAgent = async (
   useWorktree?: boolean,
   cols?: number,
   rows?: number,
+  model?: string,
 ): Promise<Agent> => {
   const response = await api.post('/agents/spawn', {
     host_id: hostId,
@@ -110,8 +123,26 @@ export const spawnAgent = async (
     use_worktree: useWorktree || false,
     cols: cols || 120,
     rows: rows || 40,
+    model,
   });
   return response.data;
+};
+
+/**
+ * Creates an empty project folder on a host and returns its
+ * absolute path. Rejects with the daemon's reason (invalid
+ * name, folder already exists) in `response.data.detail`.
+ */
+export const createProject = async (
+  hostId: number,
+  name: string,
+  gitInit: boolean,
+): Promise<string> => {
+  const response = await api.post(`/hosts/${hostId}/projects`, {
+    name,
+    git_init: gitInit,
+  });
+  return response.data.path;
 };
 
 export const stopAgent = async (agentId: string): Promise<void> => {

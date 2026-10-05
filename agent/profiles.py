@@ -72,6 +72,28 @@ class SidecarConfig:
 
 
 @dataclass
+class ModelsConfig:
+    """Model picker configuration for tools whose model is
+    chosen per session (e.g. a routing gateway's combos).
+
+    The daemon offers ``static`` names plus whatever
+    ``list_url`` returns, and exports the chosen name to
+    the agent process as the ``model_env`` variable.
+    """
+
+    # Variable the chosen model is exported as.
+    model_env: str = ""
+    # Model used when the session request names none.
+    default: str = ""
+    # Names always offered, without a network call.
+    static: List[str] = field(default_factory=list)
+    # Optional HTTP endpoint returning more names as JSON.
+    list_url: Optional[str] = None
+    # Profile env key holding the Bearer token for list_url.
+    auth_env: Optional[str] = None
+
+
+@dataclass
 class MountConfig:
     """Volume mount for container run."""
 
@@ -140,6 +162,7 @@ class AgentProfile:
     permission_patterns: List[str] = field(default_factory=list)
     spawn_settings: Dict[str, Dict[str, object]] = field(default_factory=dict)
     provisioning: Optional[ProvisioningConfig] = None
+    models: Optional[ModelsConfig] = None
 
     @property
     def supports_resume(self) -> bool:
@@ -254,6 +277,17 @@ def _parse_profile(data: dict) -> AgentProfile:
 
     # Spawn settings — JSON files to patch at spawn time
     profile.spawn_settings = data.get("spawn_settings", {})
+
+    # Per-session model picker
+    models = data.get("models")
+    if models:
+        profile.models = ModelsConfig(
+            model_env=models.get("model_env", ""),
+            default=models.get("default", ""),
+            static=models.get("static", []),
+            list_url=models.get("list_url"),
+            auth_env=models.get("auth_env"),
+        )
 
     return profile
 

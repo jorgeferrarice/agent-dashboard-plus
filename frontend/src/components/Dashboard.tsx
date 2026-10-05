@@ -3,6 +3,7 @@ import {
   getHosts,
   getAgents,
   spawnAgent,
+  createProject,
   stopAgent,
   deleteHost,
   getVersion,
@@ -68,6 +69,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
     taskDescription?: string,
     sessionMode?: string,
     useWorktree?: boolean,
+    model?: string,
   ) => {
     try {
       const newAgent = await spawnAgent(
@@ -77,6 +79,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
         taskDescription,
         sessionMode,
         useWorktree,
+        undefined,
+        undefined,
+        model,
       );
       setActiveSpawn(null);
       await fetchData();
@@ -332,11 +337,17 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
               tool={activeSpawn.tool}
               displayName={toolInfo?.display_name}
               supportsResume={toolInfo?.supports_resume}
+              models={toolInfo?.models}
+              defaultModel={toolInfo?.default_model}
+              modelsError={toolInfo?.models_error}
+              onCreateProject={(name, gitInit) =>
+                createProject(activeSpawn.hostId, name, gitInit)
+              }
               activeAgents={activeAgents.filter(
                 (a) => a.host_id === activeSpawn.hostId,
               )}
               onClose={() => setActiveSpawn(null)}
-              onSpawn={(dir, task, sessionMode, useWorktree) =>
+              onSpawn={(dir, task, sessionMode, useWorktree, model) =>
                 handleSpawn(
                   activeSpawn.hostId,
                   activeSpawn.tool,
@@ -344,6 +355,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
                   task,
                   sessionMode,
                   useWorktree,
+                  model,
                 )
               }
               onRefresh={requestProjects}

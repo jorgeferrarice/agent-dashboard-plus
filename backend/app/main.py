@@ -197,6 +197,16 @@ class SpawnRequest(BaseModel):
     use_worktree: Optional[bool] = False
     cols: Optional[int] = 120
     rows: Optional[int] = 40
+    # Model name for tools with a model picker. Validated by
+    # the host daemon against the names it offered.
+    model: Optional[str] = None
+
+
+class CreateProjectRequest(BaseModel):
+    """Schema for creating a project folder on a host."""
+
+    name: str
+    git_init: bool = False
 
 
 # Authentication Endpoints
@@ -269,6 +279,60 @@ def create_host(
             detail="Host registration failed." " Name or token might already exist.",
         )
     return db_host
+
+
+@fastapi_app.post("/hosts/{host_id}/projects")
+async def create_project(
+    host_id: int,
+    request: CreateProjectRequest,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Asks a host daemon to create an empty project folder.
+
+    The daemon owns the filesystem, so it validates the name
+    and creates the folder; this endpoint only relays the
+    request and turns the daemon's answer into an HTTP
+    response.
+
+    Args:
+        host_id: ID of the host to create the folder on.
+        request: Folder name and whether to run ``git init``.
+
+    Returns:
+        Dict with the absolute ``path`` of the new folder.
+
+    Raises:
+        HTTPException: 400 if the host is offline or the daemon
+            rejects the request, 504 if the daemon does not
+            answer in time.
+    """
+    host = db.query(models.Host).filter(models.Host.id == host_id).first()
+    sid = socket.host_sids.get(host_id)
+    if not host or host.status != "online" or not sid:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot create folder: Host is offline or does not exist.",
+        )
+    try:
+        result = await socket.sio.call(
+            "create_project",
+            {"name": request.name, "git_init": request.git_init},
+            to=sid,
+            namespace="/terminal",
+            timeout=20,
+        )
+    except socketio.exceptions.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The host did not answer the folder request.",
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = (result or {}).get("error") if isinstance(result, dict) else None
+        raise HTTPException(
+            status_code=400, detail=detail or "Could not create the folder."
+        )
+    return {"path": result["path"]}
 
 
 @fastapi_app.delete("/hosts/{host_id}")
@@ -459,6 +523,7 @@ async def spawn_agent(
             "use_worktree": request.use_worktree or False,
             "cols": request.cols or 120,
             "rows": request.rows or 40,
+            "model": request.model,
         },
         room=f"host_{request.host_id}",
         namespace="/terminal",

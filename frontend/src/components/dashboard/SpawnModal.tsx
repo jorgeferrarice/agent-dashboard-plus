@@ -4,6 +4,7 @@ import {
   X,
   RefreshCw,
   Folder,
+  FolderPlus,
   GitFork,
   Search,
 } from 'lucide-react';
@@ -20,13 +21,24 @@ export interface SpawnModalProps {
   /** Active agents on this host, used to compute the
    *  smart default for the worktree isolation toggle. */
   activeAgents?: Agent[];
+  /** Model names the user may pick. When set, the modal
+   *  shows a model selector. */
+  models?: string[];
+  /** Model preselected in the selector. */
+  defaultModel?: string;
+  /** Why the live model list could not be fetched. */
+  modelsError?: string;
   onClose: () => void;
   onSpawn: (
     dir: string,
     task: string,
     sessionMode: string,
     useWorktree: boolean,
+    model?: string,
   ) => void;
+  /** Creates an empty project folder on the host and
+   *  resolves to its absolute path. */
+  onCreateProject: (name: string, gitInit: boolean) => Promise<string>;
   onRefresh: () => void;
 }
 
@@ -34,7 +46,9 @@ export interface SpawnModalProps {
  * Modal dialog for spawning a new agent session on a host.
  * Allows selecting a project directory, entering a task
  * description, choosing resume vs. new session mode, and
- * optionally isolating the session in a git worktree.
+ * optionally isolating the session in a git worktree. The
+ * session can also start in a new empty folder, and tools
+ * with a model picker let the user choose the model.
  */
 const SpawnModal: React.FC<SpawnModalProps> = ({
   host,
@@ -42,10 +56,17 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   displayName,
   supportsResume: supportsResumeProp,
   activeAgents = [],
+  models,
+  defaultModel,
+  modelsError,
   onClose,
   onSpawn,
+  onCreateProject,
   onRefresh,
 }) => {
+  // The host has not reported yet until `projects` exists;
+  // after that an empty list means the scan found nothing.
+  const projectsLoaded = host.projects != null;
   const projects = useMemo(
     () => host.projects?.available_projects || [],
     [host.projects?.available_projects],
@@ -75,7 +96,25 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   const [task, setTask] = useState('');
   const [resumeSession, setResumeSession] = useState(true);
   const [useWorktree, setUseWorktree] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [gitInit, setGitInit] = useState(false);
+  const [createError, setCreateError] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [model, setModel] = useState(defaultModel || models?.[0] || '');
   const showResume = supportsResumeProp ?? false;
+
+  // A typed folder name takes over from the list selection:
+  // the session starts in a new folder.
+  const creatingNew = newName.trim() !== '';
+  const nonGit = useMemo(
+    () => new Set(host.projects?.non_git_projects || []),
+    [host.projects?.non_git_projects],
+  );
+  // Worktrees need a git repository with at least one
+  // commit, so they are unavailable for plain folders and
+  // for folders created here.
+  const canWorktree = !creatingNew && !nonGit.has(selectedProject);
+  const newProjectsDir = host.projects?.new_projects_dir;
 
   // Filter projects by search query (case-insensitive
   // substring match against the full path).
@@ -114,8 +153,42 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   }, [selectedProject, roots]);
 
   // When worktree is enabled, force session mode to "new"
-  // since the worktree has no prior session state.
-  const effectiveResume = useWorktree ? false : resumeSession;
+  // since the worktree has no prior session state. A new
+  // folder has no prior session either.
+  const effectiveWorktree = canWorktree && useWorktree;
+  const effectiveResume =
+    effectiveWorktree || creatingNew ? false : resumeSession;
+  const sessionModeLocked = effectiveWorktree || creatingNew;
+
+  // Starts the session, creating the folder first when the
+  // user typed a new folder name.
+  const handleInitialize = async () => {
+    let dir = selectedProject;
+    if (creatingNew) {
+      setCreating(true);
+      setCreateError('');
+      try {
+        dir = await onCreateProject(newName.trim(), gitInit);
+      } catch (err) {
+        const detail = (err as { response?: { data?: { detail?: unknown } } })
+          ?.response?.data?.detail;
+        setCreateError(
+          typeof detail === 'string' ? detail : 'Could not create the folder.',
+        );
+        setCreating(false);
+        return;
+      }
+      setCreating(false);
+    }
+    onSpawn(
+      dir,
+      task,
+      effectiveResume ? 'resume' : 'new',
+      effectiveWorktree,
+      models ? model : undefined,
+    );
+  };
+  const canInitialize = (creatingNew || !!selectedProject) && !creating;
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -133,7 +206,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
           </button>
         </div>
 
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
           <div>
             <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
               Host
@@ -171,9 +244,13 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               />
             </div>
             <div className="mt-1.5 max-h-48 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg">
-              {projects.length === 0 ? (
+              {!projectsLoaded ? (
                 <p className="text-sm text-slate-500 px-3 py-2 italic">
                   Loading projects from {roots.join(', ')}...
+                </p>
+              ) : projects.length === 0 ? (
+                <p className="text-sm text-slate-500 px-3 py-2 italic">
+                  No projects found in {roots.join(', ')}
                 </p>
               ) : filteredProjects.length === 0 ? (
                 <p className="text-sm text-slate-500 px-3 py-2 italic">
@@ -186,7 +263,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                     type="button"
                     onClick={() => setSelectedProject(p)}
                     className={`w-full text-left px-3 py-1.5 text-sm font-mono flex items-center gap-2 transition-colors ${
-                      selectedProject === p
+                      selectedProject === p && !creatingNew
                         ? 'bg-accent/20 text-accent'
                         : 'text-slate-300 hover:bg-slate-800'
                     }`}
@@ -209,29 +286,105 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             </p>
           </div>
 
+          <div>
+            <label
+              htmlFor="new-folder-name"
+              className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5"
+            >
+              <FolderPlus size={12} />
+              Or Start in a New Folder
+            </label>
+            <input
+              id="new-folder-name"
+              type="text"
+              value={newName}
+              onChange={(e) => {
+                setNewName(e.target.value);
+                setCreateError('');
+              }}
+              placeholder="new-folder-name"
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm font-mono text-slate-50 focus:outline-none focus:border-accent transition-colors"
+            />
+            <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={gitInit}
+                onChange={(e) => setGitInit(e.target.checked)}
+                disabled={!creatingNew}
+              />
+              Run git init in the new folder
+            </label>
+            {createError ? (
+              <p role="alert" className="text-xs text-red-400 mt-1">
+                {createError}
+              </p>
+            ) : (
+              creatingNew && (
+                <p className="text-[10px] text-slate-500 mt-1 italic">
+                  Creates{' '}
+                  <code className="bg-slate-900 px-1 rounded">
+                    {newProjectsDir ? `${newProjectsDir}/` : ''}
+                    {newName.trim()}
+                  </code>{' '}
+                  and starts the session there
+                </p>
+              )
+            )}
+          </div>
+
+          {models && (
+            <div>
+              <label
+                htmlFor="session-model"
+                className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2"
+              >
+                Model
+              </label>
+              <select
+                id="session-model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
+              >
+                {models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              {modelsError && (
+                <p role="alert" className="text-xs text-amber-400 mt-1">
+                  {modelsError} Showing built-in choices only.
+                </p>
+              )}
+            </div>
+          )}
+
           {showResume && (
             <div
-              className={`flex items-center gap-3 ${useWorktree ? 'opacity-50' : ''}`}
+              className={`flex items-center gap-3 ${sessionModeLocked ? 'opacity-50' : ''}`}
             >
               <div className="flex-1 min-w-0">
                 <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
                   Session Mode
                 </label>
                 <p className="text-[10px] text-slate-500 mt-0.5">
-                  {useWorktree
-                    ? 'New session (required for worktree isolation)'
-                    : effectiveResume
-                      ? 'Continue the most recent session in this project'
-                      : 'Start a fresh session'}
+                  {creatingNew
+                    ? 'New session (the folder is new)'
+                    : effectiveWorktree
+                      ? 'New session (required for worktree isolation)'
+                      : effectiveResume
+                        ? 'Continue the most recent session in this project'
+                        : 'Start a fresh session'}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setResumeSession(!resumeSession)}
-                disabled={useWorktree}
+                disabled={sessionModeLocked}
                 className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
                   effectiveResume ? 'bg-accent' : 'bg-slate-600'
-                } ${useWorktree ? 'cursor-not-allowed' : ''}`}
+                } ${sessionModeLocked ? 'cursor-not-allowed' : ''}`}
               >
                 <span
                   className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -245,33 +398,39 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             </div>
           )}
 
-          <div className="flex items-center gap-3">
+          <div
+            className={`flex items-center gap-3 ${canWorktree ? '' : 'opacity-50'}`}
+          >
             <div className="flex-1 min-w-0">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
                 <GitFork size={12} />
                 Worktree Isolation
               </label>
               <p className="text-[10px] text-slate-500 mt-0.5">
-                {useWorktree
-                  ? 'Create a separate working copy for this agent'
-                  : 'Agent works directly in the project directory'}
+                {!canWorktree
+                  ? 'Not a git repository: agent works directly in the folder'
+                  : effectiveWorktree
+                    ? 'Create a separate working copy for this agent'
+                    : 'Agent works directly in the project directory'}
               </p>
             </div>
             <button
               type="button"
+              aria-label="Worktree isolation"
               onClick={() => setUseWorktree(!useWorktree)}
+              disabled={!canWorktree}
               className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                useWorktree ? 'bg-accent' : 'bg-slate-600'
-              }`}
+                effectiveWorktree ? 'bg-accent' : 'bg-slate-600'
+              } ${canWorktree ? '' : 'cursor-not-allowed'}`}
             >
               <span
                 className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-                  useWorktree ? 'translate-x-6' : 'translate-x-1'
+                  effectiveWorktree ? 'translate-x-6' : 'translate-x-1'
                 }`}
               />
             </button>
             <span className="text-xs text-slate-300 font-medium w-16 shrink-0">
-              {useWorktree ? 'Isolated' : 'Shared'}
+              {effectiveWorktree ? 'Isolated' : 'Shared'}
             </span>
           </div>
 
@@ -296,17 +455,10 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             Cancel
           </button>
           <button
-            onClick={() =>
-              onSpawn(
-                selectedProject,
-                task,
-                effectiveResume ? 'resume' : 'new',
-                useWorktree,
-              )
-            }
-            disabled={!selectedProject}
+            onClick={handleInitialize}
+            disabled={!canInitialize}
             className={`flex-1 font-bold py-2.5 rounded-xl transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 ${
-              selectedProject
+              canInitialize
                 ? 'bg-accent hover:bg-accent-hover text-accent-text'
                 : 'bg-slate-700 text-slate-500 cursor-not-allowed border border-slate-600'
             }`}

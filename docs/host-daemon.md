@@ -84,6 +84,8 @@ podman run -d --name host-daemon --network=host \
 | `PROJECTS_ROOT` | Root directory (or colon-separated list) for project scanning | `/git` |
 | `OTLP_PORT` | OTLP telemetry receiver port | `4318` |
 | `PROJECTS_DEPTH` | Max scan depth below each `PROJECTS_ROOT` entry | `6` |
+| `PROJECTS_FOLDER_DEPTH` | Max depth at which a plain folder (no `.git`) is listed as a project. `0` lists git repositories only | `0` |
+| `NEW_PROJECTS_DIR` | Directory where folders created from the spawn dialog are placed | first `PROJECTS_ROOT` entry |
 | `OTLP_DEBUG` | Set to any value to log raw OTLP payloads for troubleshooting | — |
 | `GEMINI_API_KEY` | API key for Gemini CLI (if installed) | — |
 | `CLAUDE_CODE_USE_VERTEX` | Set to `1` to use Vertex AI for Claude | — |
@@ -270,3 +272,35 @@ RestartSec=5
 The daemon has built-in error recovery for background tasks,
 but defense-in-depth restart ensures availability even for
 unhandled edge cases.
+
+## Projects: Git Repositories and Plain Folders
+
+A *project* is a directory a session can start in. The daemon rescans
+every 60 seconds and on **Force Refresh**.
+
+- **Git repositories** are listed up to `PROJECTS_DEPTH` levels below
+  each root.
+- **Plain folders** are listed up to `PROJECTS_FOLDER_DEPTH` levels
+  below each root, unless they sit inside a git repository. A session
+  in a plain folder edits the files in place; worktree isolation is
+  disabled for it in the spawn dialog.
+- **Never scanned:** hidden directories, `node_modules`, and, directly
+  under a root, the macOS home folders `Library`, `Applications`,
+  `Movies`, `Music`, `Pictures` and `Public`. This keeps the scan fast
+  when a root is a home directory.
+
+The spawn dialog can also create a **new folder**: type a name and the
+daemon creates `NEW_PROJECTS_DIR/<name>`, optionally runs `git init`,
+and starts the session there. The name must be a single path component
+made of letters, digits, `.`, `_` or `-`, starting with a letter or
+digit. An existing folder is never overwritten.
+
+### Mounting a whole home directory
+
+`scripts/run-daemon.sh` mounts the host home directory at its own path
+and uses it as `PROJECTS_ROOT`, so any folder under it can host a
+session. **Every agent session can then read and write the entire home
+directory**; only `~/.ssh` and `~/.claude.json` are mounted read-only.
+Use a narrower mount if the dashboard is reachable by anyone you would
+not hand a shell to.
+
