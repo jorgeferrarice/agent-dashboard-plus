@@ -1401,6 +1401,20 @@ class TestModelPicker:
         assert info["default_model"] == "auto"
         assert "models_error" not in info
 
+    def test_refresh_remembers_models_for_spawn_validation(self, daemon):
+        """A refreshed list is what spawn requests are checked against."""
+        profile = _model_profile(list_url="http://gw/v1/models")
+        payload = {"object": "list", "data": [{"id": "claude/opus"}]}
+        with patch(
+            "agent.host_daemon.urllib.request.urlopen",
+            return_value=_FakeResponse(payload),
+        ):
+            assert daemon._refresh_tool_models(profile) == (
+                ["auto", "claude/opus"],
+                None,
+            )
+        assert daemon._tool_models["router"] == ["auto", "claude/opus"]
+
     def test_spawn_rejects_model_not_offered(self, daemon):
         """A model the daemon never offered fails before anything runs."""
         daemon.profiles["router"] = _model_profile()

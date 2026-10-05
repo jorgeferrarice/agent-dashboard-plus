@@ -130,6 +130,56 @@ describe('SpawnModal', () => {
     expect(onSpawn.mock.calls[1][4]).toBe('General Usage');
   });
 
+  it('replaces the model choices with the live list on open', async () => {
+    const onLoadModels = vi.fn().mockResolvedValue({
+      models: ['auto', 'General Usage', 'claude/claude-opus-5'],
+      default_model: 'auto',
+      error: null,
+    });
+    const { onSpawn } = renderModal({
+      models: ['auto'],
+      defaultModel: 'auto',
+      onLoadModels,
+    });
+    expect(
+      await screen.findByText('3 models and combos available'),
+    ).toBeInTheDocument();
+    expect(onLoadModels).toHaveBeenCalledTimes(1);
+    const options = document.querySelectorAll('#session-model-options option');
+    expect(Array.from(options).map((o) => o.getAttribute('value'))).toEqual([
+      'auto',
+      'General Usage',
+      'claude/claude-opus-5',
+    ]);
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'claude/claude-opus-5' },
+    });
+    fireEvent.click(initialize());
+    expect(onSpawn.mock.calls[0][4]).toBe('claude/claude-opus-5');
+  });
+
+  it('blocks a typed model that is not in the list', () => {
+    const { onSpawn } = renderModal({ models: ['auto'], defaultModel: 'auto' });
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'not-a-model' },
+    });
+    expect(initialize()).toBeDisabled();
+    expect(screen.getByText('Pick one of the listed models')).toBeVisible();
+    expect(onSpawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps the reported choices when the live fetch fails', async () => {
+    renderModal({
+      models: ['auto'],
+      defaultModel: 'auto',
+      onLoadModels: vi.fn().mockRejectedValue(new Error('offline')),
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not refresh the model list.',
+    );
+    expect(initialize()).toBeEnabled();
+  });
+
   it('warns when the live model list is unavailable', () => {
     renderModal({
       models: ['auto'],

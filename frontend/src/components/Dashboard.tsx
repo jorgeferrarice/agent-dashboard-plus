@@ -4,6 +4,7 @@ import {
   getAgents,
   spawnAgent,
   createProject,
+  getToolModels,
   stopAgent,
   deleteHost,
   getVersion,
@@ -340,6 +341,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
               models={toolInfo?.models}
               defaultModel={toolInfo?.default_model}
               modelsError={toolInfo?.models_error}
+              onLoadModels={() =>
+                getToolModels(activeSpawn.hostId, activeSpawn.tool)
+              }
               onCreateProject={(name, gitInit) =>
                 createProject(activeSpawn.hostId, name, gitInit)
               }

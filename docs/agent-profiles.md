@@ -198,12 +198,13 @@ models:
   model_env: ANTHROPIC_MODEL   # variable the choice is exported as
   default: auto                # used when the user picks nothing
   static: [auto, auto/fast]    # names always offered
-  list_url: "http://host.containers.internal:20128/v1/combos"
+  list_url: "http://host.containers.internal:20128/v1/models"
   auth_env: ANTHROPIC_AUTH_TOKEN   # profile env key with the Bearer token
 ```
 
 `list_url` and `auth_env` are optional. When set, the daemon fetches
-more names at startup and on **Force Refresh**. The endpoint may return
+more names every time the spawn dialog opens, so the choices are always
+current. The dialog offers them as a type-to-search field. The endpoint may return
 a JSON list or an object holding the list under `combos`, `data` or
 `models`; entries are strings or objects with a `name` or `id`. If the
 request fails, the static names are still offered and the dialog shows
@@ -214,7 +215,8 @@ the reason. The daemon only accepts a model it offered.
 The bundled `omniroute` profile runs Claude Code through a local
 [OmniRoute](https://github.com/diegosouzapw/OmniRoute) gateway, which
 distributes requests across providers. The spawn dialog lists
-OmniRoute's auto-routing names and the combos from its dashboard.
+OmniRoute's whole model catalog: auto-routing names, the combos from its
+dashboard and every provider model.
 
 1. Create an API key in the OmniRoute dashboard under **Endpoints**.
 2. Put it in `agent/profiles/omniroute.local.yaml` (keep this file out

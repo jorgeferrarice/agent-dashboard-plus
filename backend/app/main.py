@@ -335,6 +335,62 @@ async def create_project(
     return {"path": result["path"]}
 
 
+@fastapi_app.get("/hosts/{host_id}/tools/{tool_name}/models")
+async def list_tool_models(
+    host_id: int,
+    tool_name: str,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Asks a host daemon for a tool's current model list.
+
+    Used by the spawn dialog when it opens, so the model
+    choices reflect what the tool's model endpoint offers at
+    that moment.
+
+    Args:
+        host_id: ID of the host running the tool.
+        tool_name: Profile name of the tool.
+
+    Returns:
+        Dict with ``models`` (list of names), ``default_model``
+        and ``error`` (why the live list is incomplete, or None).
+
+    Raises:
+        HTTPException: 400 if the host is offline or the tool
+            has no model list, 504 if the daemon does not
+            answer in time.
+    """
+    host = db.query(models.Host).filter(models.Host.id == host_id).first()
+    sid = socket.host_sids.get(host_id)
+    if not host or host.status != "online" or not sid:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot list models: Host is offline or does not exist.",
+        )
+    try:
+        result = await socket.sio.call(
+            "list_models",
+            {"tool": tool_name},
+            to=sid,
+            namespace="/terminal",
+            timeout=15,
+        )
+    except socketio.exceptions.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The host did not answer the model list request.",
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = result.get("error") if isinstance(result, dict) else None
+        raise HTTPException(status_code=400, detail=detail or "Could not list models.")
+    return {
+        "models": result.get("models", []),
+        "default_model": result.get("default_model"),
+        "error": result.get("error"),
+    }
+
+
 @fastapi_app.delete("/hosts/{host_id}")
 def delete_host(
     host_id: int,

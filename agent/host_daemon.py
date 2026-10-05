@@ -304,6 +304,37 @@ class HostDaemon:
             await self.scan_and_report_projects()
             return {"ok": True, "path": path}
 
+        @self.sio.on("list_models", namespace="/terminal")
+        async def on_list_models(data):
+            """Fetches the current model list for one tool.
+
+            Called when the spawn dialog opens, so the user
+            always picks from what the model endpoint offers
+            right now rather than a list cached at startup.
+
+            data: {'tool': '...'}
+
+            Returns:
+                Acknowledgement dict: {'ok': True, 'models':
+                [...], 'default_model': '...', 'error': str or
+                None}, or {'ok': False, 'error': '...'} if the
+                tool has no model picker.
+            """
+            tool = (data or {}).get("tool")
+            profile = self.profiles.get(tool)
+            if not profile or not profile.models or not profile.models.model_env:
+                return {"ok": False, "error": "This tool has no model list."}
+            loop = asyncio.get_running_loop()
+            models, error = await loop.run_in_executor(
+                None, self._refresh_tool_models, profile
+            )
+            return {
+                "ok": True,
+                "models": models,
+                "default_model": profile.models.default,
+                "error": error,
+            }
+
         @self.sio.on("terminal_resize", namespace="/terminal")
         async def on_terminal_resize(data):
             agent_id = data.get("sid")
@@ -643,6 +674,23 @@ class HostDaemon:
                 names.append(item)
         return names, None
 
+    def _refresh_tool_models(self, profile) -> tuple:
+        """Fetches a profile's model list and remembers it.
+
+        The remembered list is what a spawn request's model
+        is validated against.
+
+        Args:
+            profile: AgentProfile with a ``models`` section.
+
+        Returns:
+            Tuple of (list of model names, error message or
+            None).
+        """
+        models, error = self._fetch_models(profile)
+        self._tool_models[profile.name] = models
+        return models, error
+
     def _make_tool_info(self, profile) -> dict:
         """Builds a tool metadata dict from a profile for
         the available_tools payload sent to the frontend.
@@ -667,8 +715,7 @@ class HostDaemon:
         # user may choose from. The list is remembered so a
         # spawn request can only name a model offered here.
         if profile.models and profile.models.model_env:
-            models, error = self._fetch_models(profile)
-            self._tool_models[profile.name] = models
+            models, error = self._refresh_tool_models(profile)
             info["models"] = models
             info["default_model"] = profile.models.default
             if error:

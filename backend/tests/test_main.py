@@ -455,3 +455,33 @@ def test_create_project_relays_daemon_answer(monkeypatch):
     r = client.post(f"/hosts/{host_id}/projects", json={"name": "x"})
     assert r.status_code == 400
     assert r.json()["detail"] == "A folder with that name already exists."
+
+
+def test_list_tool_models_relays_daemon_answer(monkeypatch):
+    """The daemon's live model list is returned; a refusal becomes a 400."""
+    from backend.app import socket
+
+    host_id = _online_host("models-host")
+    monkeypatch.setitem(socket.host_sids, host_id, "sid-2")
+    answers = iter(
+        [
+            {"ok": True, "models": ["auto", "x"], "default_model": "auto"},
+            {"ok": False, "error": "This tool has no model list."},
+        ]
+    )
+    sent = []
+
+    async def fake_call(event, data, **kwargs):
+        sent.append((event, data, kwargs.get("to")))
+        return next(answers)
+
+    monkeypatch.setattr(socket.sio, "call", fake_call)
+
+    r = client.get(f"/hosts/{host_id}/tools/omniroute/models")
+    assert r.status_code == 200
+    assert r.json() == {"models": ["auto", "x"], "default_model": "auto", "error": None}
+    assert sent == [("list_models", {"tool": "omniroute"}, "sid-2")]
+
+    r = client.get(f"/hosts/{host_id}/tools/bash/models")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "This tool has no model list."

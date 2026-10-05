@@ -38,19 +38,13 @@ env:
   OTEL_LOGS_EXPORTER: "otlp"
   OTEL_EXPORTER_OTLP_PROTOCOL: "http/json"
 
-# Per-session model picker: OmniRoute's auto-routing names plus
-# the combos defined in its dashboard.
+# Per-session model picker. OmniRoute's model catalog lists its
+# auto-routing names, the combos defined in its dashboard and
+# every provider model. Only `auto` is offered if it is down.
 models:
   model_env: ANTHROPIC_MODEL
   default: auto
-  static:
-    - auto
-    - auto/coding
-    - auto/fast
-    - auto/cheap
-    - auto/smart
-    - auto/offline
-  list_url: "http://host.containers.internal:20128/v1/combos"
+  list_url: "http://host.containers.internal:20128/v1/models"
   auth_env: ANTHROPIC_AUTH_TOKEN
 
 mcp:

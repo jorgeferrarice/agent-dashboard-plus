@@ -8,7 +8,7 @@ import {
   GitFork,
   Search,
 } from 'lucide-react';
-import type { Agent, Host } from '../../api';
+import type { Agent, Host, ToolModels } from '../../api';
 
 /** Props for the SpawnModal component. */
 export interface SpawnModalProps {
@@ -28,6 +28,10 @@ export interface SpawnModalProps {
   defaultModel?: string;
   /** Why the live model list could not be fetched. */
   modelsError?: string;
+  /** Fetches the tool's current model list from the host.
+   *  Called once when the modal opens; `models` is shown
+   *  until it answers. */
+  onLoadModels?: () => Promise<ToolModels>;
   onClose: () => void;
   onSpawn: (
     dir: string,
@@ -56,9 +60,10 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   displayName,
   supportsResume: supportsResumeProp,
   activeAgents = [],
-  models,
+  models: initialModels,
   defaultModel,
-  modelsError,
+  modelsError: initialModelsError,
+  onLoadModels,
   onClose,
   onSpawn,
   onCreateProject,
@@ -100,7 +105,39 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   const [gitInit, setGitInit] = useState(false);
   const [createError, setCreateError] = useState('');
   const [creating, setCreating] = useState(false);
-  const [model, setModel] = useState(defaultModel || models?.[0] || '');
+  // Model choices start from what the host reported at its
+  // last scan and are replaced by a live fetch on open.
+  const [models, setModels] = useState(initialModels);
+  const [modelsError, setModelsError] = useState(initialModelsError);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [model, setModel] = useState(defaultModel || initialModels?.[0] || '');
+  const hasModelPicker = initialModels != null;
+
+  useEffect(() => {
+    if (!hasModelPicker || !onLoadModels) return;
+    let cancelled = false;
+    setModelsLoading(true);
+    onLoadModels()
+      .then((live) => {
+        if (cancelled) return;
+        setModels(live.models);
+        setModelsError(live.error || undefined);
+      })
+      .catch(() => {
+        if (!cancelled) setModelsError('Could not refresh the model list.');
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch once per modal open
+  }, []);
+
+  // The host only accepts a model it offered, so a typed
+  // name must match one of the choices exactly.
+  const modelValid = !models || models.includes(model);
   const showResume = supportsResumeProp ?? false;
 
   // A typed folder name takes over from the list selection:
@@ -188,7 +225,8 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
       models ? model : undefined,
     );
   };
-  const canInitialize = (creatingNew || !!selectedProject) && !creating;
+  const canInitialize =
+    (creatingNew || !!selectedProject) && !creating && modelValid;
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -340,21 +378,38 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               >
                 Model
               </label>
-              <select
+              <input
                 id="session-model"
+                type="text"
+                list="session-model-options"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
-              >
+                onFocus={(e) => e.target.select()}
+                placeholder="Type to search models and combos..."
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={!modelValid}
+                className={`w-full bg-slate-900 border rounded-lg py-2 px-4 text-sm font-mono text-slate-50 focus:outline-none transition-colors ${
+                  modelValid
+                    ? 'border-slate-700 focus:border-accent'
+                    : 'border-red-500'
+                }`}
+              />
+              <datalist id="session-model-options">
                 {models.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
+                  <option key={m} value={m} />
                 ))}
-              </select>
+              </datalist>
+              <p className="text-[10px] text-slate-500 mt-1 italic">
+                {modelsLoading
+                  ? 'Refreshing model list...'
+                  : !modelValid
+                    ? 'Pick one of the listed models'
+                    : `${models.length} models and combos available`}
+              </p>
               {modelsError && (
                 <p role="alert" className="text-xs text-amber-400 mt-1">
-                  {modelsError} Showing built-in choices only.
+                  {modelsError} The list may be incomplete.
                 </p>
               )}
             </div>

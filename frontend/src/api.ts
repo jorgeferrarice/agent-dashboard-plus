@@ -194,3 +194,25 @@ export const getVersion = async (): Promise<VersionInfo> => {
 };
 
 export default api;
+
+/** Live model list of a tool, as reported by its host. */
+export interface ToolModels {
+  models: string[];
+  default_model?: string | null;
+  /** Why the live list is incomplete, if it is. */
+  error?: string | null;
+}
+
+/**
+ * Fetches the models a tool offers right now. The host asks
+ * the tool's model endpoint on every call.
+ */
+export const getToolModels = async (
+  hostId: number,
+  toolName: string,
+): Promise<ToolModels> => {
+  const response = await api.get(
+    `/hosts/${hostId}/tools/${encodeURIComponent(toolName)}/models`,
+  );
+  return response.data;
+};
