@@ -436,7 +436,18 @@ class HostDaemon:
 
         @self.sio.on("request_history", namespace="/terminal")
         async def on_request_history(data):
+            """Replays an agent's output history.
+
+            data: {'agent_id': '...', 'requester': '<sid>'}
+
+            ``requester`` is the Socket.IO session of the UI
+            client that just attached. It is echoed on every
+            replay message so the hub delivers the history to
+            that client only; without it (older hubs) the
+            replay goes to the whole agent room.
+            """
             agent_id = data.get("agent_id")
+            requester = data.get("requester")
             if agent_id in self.agents and self.sio.connected:
                 log.info(f"Replaying history for agent: {agent_id}")
                 # Concatenate history into batches to reduce
@@ -447,23 +458,31 @@ class HostDaemon:
                 # handful of emits.
                 batch = ""
                 batch_limit = 65536
-                for chunk in self.agents[agent_id]["history"]:
+                # Snapshot: the read loop appends to the deque
+                # while this coroutine awaits between emits.
+                for chunk in list(self.agents[agent_id]["history"]):
                     batch += chunk
                     if len(batch) >= batch_limit:
                         await self.sio.emit(
                             "terminal_output",
-                            {"sid": agent_id, "output": batch},
+                            {
+                                "sid": agent_id,
+                                "output": batch,
+                                "requester": requester,
+                            },
                             namespace="/terminal",
                         )
                         batch = ""
                 if batch:
                     await self.sio.emit(
                         "terminal_output",
-                        {"sid": agent_id, "output": batch},
+                        {"sid": agent_id, "output": batch, "requester": requester},
                         namespace="/terminal",
                     )
                 await self.sio.emit(
-                    "history_complete", {"agent_id": agent_id}, namespace="/terminal"
+                    "history_complete",
+                    {"agent_id": agent_id, "requester": requester},
+                    namespace="/terminal",
                 )
 
         @self.sio.on("terminal_input", namespace="/terminal")

@@ -10,6 +10,7 @@ import {
   TerminalSquare,
   ExternalLink,
   RefreshCw,
+  SquareArrowOutUpRight,
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import type { AgentDetail, Agent, ToolInfo } from '../api';
@@ -21,10 +22,29 @@ import {
   normalizeToolInfo,
 } from '../api';
 import { getToolColorsByKeyword } from './dashboard/utils';
+import { openTerminalWindow } from './terminalWindow';
 
 interface TerminalProps {
   agentId: string;
   onClose: () => void;
+  /**
+   * Shared Socket.IO connection. When given, the terminal
+   * runs as an in-page tab: it joins and leaves the agent's
+   * room on this connection instead of opening its own, and
+   * leaves the page title and window alone.
+   */
+  socket?: Socket;
+  /** The session is already known to have ended. */
+  ended?: boolean;
+  /** Opens another session (a companion). Defaults to a
+   *  popup window. */
+  onOpenAgent?: (agentId: string) => void;
+  /** Called with the replacement session after a resume.
+   *  Defaults to navigating this window to it. */
+  onReplace?: (newAgentId: string) => void;
+  /** Moves this session to its own window. Shows the
+   *  detach button when given. */
+  onDetach?: () => void;
 }
 
 /** Canonical tool type buckets */
@@ -53,20 +73,23 @@ const TOOL_LABELS: Record<ToolCategory, string> = {
   unknown: 'Agent',
 };
 
-/** Open (or focus) a terminal popup window for the given agent. */
-function openTerminalWindow(agentId: string) {
-  const width = 1024;
-  const height = 768;
-  const left = (window.screen.width - width) / 2;
-  const top = (window.screen.height - height) / 2;
-  window.open(
-    `/terminal/${agentId}`,
-    `agent_${agentId}`,
-    `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,personalbar=no`,
-  );
-}
-
-const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
+const Terminal: React.FC<TerminalProps> = ({
+  agentId,
+  onClose,
+  socket: sharedSocket,
+  ended = false,
+  onOpenAgent,
+  onReplace,
+  onDetach,
+}) => {
+  const embedded = !!sharedSocket;
+  const openAgent = onOpenAgent ?? openTerminalWindow;
+  // Callbacks read through refs so the xterm effect does not
+  // re-run (and rebuild the terminal) when they change.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -77,7 +100,7 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
   const [spawning, setSpawning] = useState(false);
 
   // Stale session reconnect state
-  const [sessionLost, setSessionLost] = useState(false);
+  const [sessionLost, setSessionLost] = useState(ended);
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectError, setReconnectError] = useState<string | null>(null);
   const reconnectingRef = useRef(false);
@@ -102,52 +125,53 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
     return () => clearInterval(interval);
   }, [agentId]);
 
-  // Auto-reconnect when a stale session is detected:
-  // stop the old agent record, spawn a replacement with
-  // resume mode, and navigate to the new terminal.
-  useEffect(() => {
-    if (!sessionLost || reconnecting || reconnectError) return;
-    if (!agentDetail) return;
+  // Resume a lost session on request: stop the old agent
+  // record, spawn a replacement with resume mode, and switch
+  // to it. Nothing is respawned without the user asking, so a
+  // session that ended stays visibly ended.
+  const handleResume = useCallback(async () => {
+    if (!agentDetail || reconnectingRef.current) return;
+    setReconnecting(true);
+    setReconnectError(null);
+    reconnectingRef.current = true;
+    try {
+      // Stop the stale agent record (ignore errors —
+      // it may already be cleaned up)
+      await stopAgent(agentId).catch(() => {});
 
-    const reconnect = async () => {
-      setReconnecting(true);
-      reconnectingRef.current = true;
-      try {
-        // Stop the stale agent record (ignore errors —
-        // it may already be cleaned up)
-        await stopAgent(agentId).catch(() => {});
+      // Spawn a new agent with the same parameters,
+      // using resume mode for session continuity.
+      // If the stale session was in a worktree, use
+      // the worktree path so the agent resumes in the
+      // same isolated directory with its branch and
+      // uncommitted work intact.
+      const projectDir =
+        agentDetail.telemetry?.worktree_path ||
+        agentDetail.telemetry?.project_dir;
+      const newAgent = await spawnAgent(
+        agentDetail.host_id,
+        agentDetail.tool_name || 'bash',
+        projectDir,
+        agentDetail.telemetry?.task_description,
+        'resume',
+      );
 
-        // Spawn a new agent with the same parameters,
-        // using resume mode for session continuity.
-        // If the stale session was in a worktree, use
-        // the worktree path so the agent resumes in the
-        // same isolated directory with its branch and
-        // uncommitted work intact.
-        const projectDir =
-          agentDetail.telemetry?.worktree_path ||
-          agentDetail.telemetry?.project_dir;
-        const newAgent = await spawnAgent(
-          agentDetail.host_id,
-          agentDetail.tool_name || 'bash',
-          projectDir,
-          agentDetail.telemetry?.task_description,
-          'resume',
-        );
-
-        // Navigate to the new agent's terminal and update
-        // the window name so the dashboard's window.open()
-        // can find and focus this popup instead of opening
-        // a duplicate
-        window.name = `agent_${newAgent.agent_id}`;
-        window.location.replace(`/terminal/${newAgent.agent_id}`);
-      } catch (err) {
-        console.error('Reconnect failed:', err);
-        setReconnectError('Failed to reconnect — the host may be offline.');
-        setReconnecting(false);
+      if (onReplace) {
+        onReplace(newAgent.agent_id);
+        return;
       }
-    };
-    reconnect();
-  }, [agentId, sessionLost, agentDetail, reconnecting, reconnectError]);
+      // Navigate to the new agent's terminal and update
+      // the window name so window.open() can find and
+      // focus this popup instead of opening a duplicate
+      window.name = `agent_${newAgent.agent_id}`;
+      window.location.replace(`/terminal/${newAgent.agent_id}`);
+    } catch (err) {
+      console.error('Resume failed:', err);
+      setReconnectError('Failed to resume — the host may be offline.');
+      setReconnecting(false);
+      reconnectingRef.current = false;
+    }
+  }, [agentId, agentDetail, onReplace]);
 
   // Listen for live telemetry updates to keep header fresh
   useEffect(() => {
@@ -176,7 +200,7 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
       // Check existing companions for matching tool
       const existing = companions.find((c) => c.tool_name === targetTool);
       if (existing) {
-        openTerminalWindow(existing.agent_id);
+        openAgent(existing.agent_id);
         return;
       }
 
@@ -197,14 +221,14 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
           undefined, // sessionMode
           false, // useWorktree — share parent's directory
         );
-        openTerminalWindow(spawned.agent_id);
+        openAgent(spawned.agent_id);
       } catch (err) {
         console.error('Failed to spawn companion:', err);
       } finally {
         setSpawning(false);
       }
     },
-    [companions, agentDetail, spawning],
+    [companions, agentDetail, spawning, openAgent],
   );
 
   // xterm + socket setup
@@ -283,8 +307,11 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
     let lastSentCols = 0;
     let lastSentRows = 0;
 
+    // Set on cleanup: queued animation frames and timers
+    // must not touch a disposed terminal.
+    let disposed = false;
     const performFit = () => {
-      if (!terminalRef.current) return;
+      if (disposed || !terminalRef.current) return;
       try {
         const wasAtBottom = isAtBottom;
         fitAddon.fit();
@@ -336,9 +363,10 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
       }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
-    window.addEventListener('focus', () => {
+    const onWindowFocus = () => {
       requestAnimationFrame(performFit);
-    });
+    };
+    window.addEventListener('focus', onWindowFocus);
 
     let resizeObserver: ResizeObserver | null = null;
     if (terminalRef.current) {
@@ -462,26 +490,32 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
     // during replay.
     let historyBuffer: string[] = [];
 
-    // Socket.IO
+    // Socket.IO: the shared connection when running as a
+    // tab, otherwise a connection owned by this window.
     const baseURL =
       import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
-    const socket = io(`${baseURL}/terminal`, {
-      path: '/socket.io',
-    });
+    const socket =
+      sharedSocket ??
+      io(`${baseURL}/terminal`, {
+        path: '/socket.io',
+      });
     socketRef.current = socket;
 
     // Track disconnect time so we can detect brief
     // interruptions (e.g. browser pausing JS during
     // window drag-resize) vs real outages.
     let disconnectedAt: number | null = null;
+    let attached = false;
     const BRIEF_DISCONNECT_MS = 30000;
 
-    socket.on('disconnect', () => {
+    const onDisconnect = () => {
       disconnectedAt = Date.now();
-    });
+    };
 
-    socket.on('connect', () => {
+    const onConnect = () => {
       const wasBrief =
+        attached &&
+        !sharedSocket &&
         disconnectedAt !== null &&
         Date.now() - disconnectedAt < BRIEF_DISCONNECT_MS;
       disconnectedAt = null;
@@ -499,12 +533,21 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
         return;
       }
 
+      // A reconnect on the shared connection gets a new
+      // server session and loses its rooms, so it always
+      // rejoins. Clear the screen first: the replayed
+      // history redraws it.
+      if (attached) term.reset();
+      attached = true;
+
       // Full reconnect — replay history.
       isReplaying.current = true;
       historyBuffer = [];
       // Send resize BEFORE joining the room so tmux
       // has the correct dimensions before history is
       // replayed.
+      lastSentCols = 0;
+      lastSentRows = 0;
       performFit();
       socket.emit('join_room', { room: agentId });
 
@@ -517,9 +560,9 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
           isReplaying.current = false;
         }
       }, 5000);
-    });
+    };
 
-    socket.on('history_complete', (data: { agent_id: string }) => {
+    const onHistoryComplete = (data: { agent_id: string }) => {
       if (data.agent_id === agentId) {
         // History arrived — session is alive, cancel
         // the stale detection timeout
@@ -533,9 +576,9 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
         isReplaying.current = false;
         replayEndTime = Date.now();
       }
-    });
+    };
 
-    socket.on('terminal_output', (data: { sid: string; output: string }) => {
+    const onTerminalOutput = (data: { sid: string; output: string }) => {
       if (data.sid !== agentId) return;
       if (isReplaying.current) {
         // Collect history chunks for batched write
@@ -547,28 +590,32 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
           rafId = requestAnimationFrame(flushOutput);
         }
       }
-    });
+    };
 
     // Handle agent lifecycle events. "stopped" means the
     // user intentionally stopped the agent — close the
-    // terminal window. "closed" means a daemon-side
-    // disconnect — trigger auto-reconnect.
-    socket.on(
-      'agent_status_update',
-      (data: { agent_id: string; status: string }) => {
-        if (data.agent_id !== agentId) return;
-        if (data.status === 'stopped' && !reconnectingRef.current) {
-          // User-initiated stop — close the window
-          // instead of auto-reconnecting. Skip if
-          // we're reconnecting (our own stopAgent call
-          // triggers this event).
-          window.close();
-        } else if (data.status === 'closed') {
-          setSessionLost(true);
-          isReplaying.current = false;
-        }
-      },
-    );
+    // terminal. "closed" means the session ended on the
+    // host — show it as ended and offer to resume.
+    const onStatusUpdate = (data: { agent_id: string; status: string }) => {
+      if (data.agent_id !== agentId) return;
+      if (data.status === 'stopped' && !reconnectingRef.current) {
+        // Skip while resuming: our own stopAgent call
+        // triggers this event.
+        if (sharedSocket) onCloseRef.current();
+        else window.close();
+      } else if (data.status === 'closed') {
+        setSessionLost(true);
+        isReplaying.current = false;
+      }
+    };
+
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect', onConnect);
+    socket.on('history_complete', onHistoryComplete);
+    socket.on('terminal_output', onTerminalOutput);
+    socket.on('agent_status_update', onStatusUpdate);
+    // The shared connection is usually up already.
+    if (socket.connected) onConnect();
 
     // Filter terminal query responses from user input.
     // eslint-disable-next-line no-control-regex
@@ -603,8 +650,10 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
     });
 
     return () => {
+      disposed = true;
       window.removeEventListener('resize', debouncedFit);
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
       if (resizeTimer) clearTimeout(resizeTimer);
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (historyTimeoutRef.current) clearTimeout(historyTimeoutRef.current);
@@ -615,10 +664,21 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
         screenEl.removeEventListener('touchend', onTouchEnd);
         screenEl.removeEventListener('wheel', onWheel);
       }
-      socket.disconnect();
+      socket.off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
+      socket.off('history_complete', onHistoryComplete);
+      socket.off('terminal_output', onTerminalOutput);
+      socket.off('agent_status_update', onStatusUpdate);
+      if (sharedSocket) {
+        // Stop this session's output from reaching the
+        // page now that nothing displays it.
+        if (socket.connected) socket.emit('leave_room', { room: agentId });
+      } else {
+        socket.disconnect();
+      }
       term.dispose();
     };
-  }, [agentId]);
+  }, [agentId, sharedSocket]);
 
   // Derived header values
   const category = categorize(agentDetail?.tool_name);
@@ -648,6 +708,8 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
 
   // Update browser window title with host / project / branch
   useEffect(() => {
+    // As a tab the page title belongs to the workspace.
+    if (embedded) return;
     const parts = [toolLabel];
     if (hostName) parts.push(hostName);
     if (gitProject) parts.push(gitProject);
@@ -657,7 +719,7 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
     return () => {
       document.title = 'Agent Dashboard';
     };
-  }, [toolLabel, hostName, gitProject, gitBranch, worktreePath]);
+  }, [embedded, toolLabel, hostName, gitProject, gitBranch, worktreePath]);
 
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-black overflow-hidden">
@@ -754,12 +816,25 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
             );
           })}
 
+          {onDetach && (
+            <button
+              onClick={onDetach}
+              title="Move this session to its own window"
+              className="flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium"
+            >
+              <SquareArrowOutUpRight size={12} />
+              <span>Detach</span>
+            </button>
+          )}
+
           <button
             onClick={onClose}
             className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-3 py-1.5 rounded-md transition-colors border border-red-500/20 cursor-pointer"
           >
             <XCircle size={14} />
-            <span className="font-semibold text-xs">Close Window</span>
+            <span className="font-semibold text-xs">
+              {embedded ? 'Close Tab' : 'Close Window'}
+            </span>
           </button>
         </div>
       </div>
@@ -768,33 +843,46 @@ const Terminal: React.FC<TerminalProps> = ({ agentId, onClose }) => {
       <div className="flex-1 flex flex-col h-full min-h-0 bg-black p-2 overflow-hidden relative">
         <div className="flex-1 h-full min-h-0">
           <div
-            id="terminal"
             ref={terminalRef}
             className="terminal xterm"
             style={{ height: '100%' }}
           />
         </div>
 
-        {/* Reconnecting overlay shown when a stale session
-            is detected and auto-reconnect is in progress */}
-        {(reconnecting || reconnectError) && (
+        {/* Shown when the session ended or can no longer be
+            reached. It is resumed only on request. */}
+        {sessionLost && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
             <div className="text-center space-y-4 max-w-sm">
-              {reconnectError ? (
-                <>
-                  <p className="text-red-400 text-sm">{reconnectError}</p>
-                  <button
-                    onClick={onClose}
-                    className="text-slate-400 hover:text-slate-50 px-4 py-2 rounded-xl border border-slate-700 transition-colors text-sm"
-                  >
-                    Close
-                  </button>
-                </>
-              ) : (
+              {reconnecting ? (
                 <p className="text-slate-300 text-sm flex items-center gap-2">
                   <RefreshCw size={14} className="animate-spin" />
-                  Reconnecting session...
+                  Resuming session...
                 </p>
+              ) : (
+                <>
+                  <p
+                    role="alert"
+                    className={`text-sm ${reconnectError ? 'text-red-400' : 'text-slate-300'}`}
+                  >
+                    {reconnectError || 'This session has ended.'}
+                  </p>
+                  <div className="flex gap-3 justify-center">
+                    <button
+                      onClick={handleResume}
+                      disabled={!agentDetail}
+                      className="bg-accent hover:bg-accent-hover text-accent-text font-bold px-4 py-2 rounded-xl transition-colors text-sm disabled:opacity-50"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      onClick={onClose}
+                      className="text-slate-400 hover:text-slate-50 px-4 py-2 rounded-xl border border-slate-700 transition-colors text-sm"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </div>

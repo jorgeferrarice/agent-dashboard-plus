@@ -71,6 +71,7 @@ const HostCard: React.FC<HostCardProps> = ({
             return (
               <button
                 key={tool.name}
+                title={`Spawn ${tool.display_name}`}
                 onClick={() => onSpawnClick(host.id, tool.name)}
                 disabled={!isOnline}
                 className={`text-xs px-3 py-1.5 rounded-md border transition-colors flex items-center gap-1.5 ${
@@ -79,7 +80,7 @@ const HostCard: React.FC<HostCardProps> = ({
                     : 'bg-slate-700/50 text-slate-500 border-slate-700 cursor-not-allowed'
                 }`}
               >
-                <PlusCircle size={14} /> Spawn {tool.display_name}
+                <PlusCircle size={14} /> {tool.display_name}
               </button>
             );
           })}

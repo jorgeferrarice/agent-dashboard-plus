@@ -151,11 +151,13 @@ async def handle_terminal_output(sid, data):
     output = data.get("output", "")
 
     if agent_id and output:
-        # Broadcast to the room dedicated to this agent's ID
+        # History replay is addressed to the one client that
+        # asked for it; live output goes to everyone in the
+        # room dedicated to this agent's ID.
         await sio.emit(
             "terminal_output",
             {"sid": agent_id, "output": output},
-            room=agent_id,
+            to=data.get("requester") or agent_id,
             namespace="/terminal",
         )
 
@@ -180,12 +182,30 @@ async def handle_join_room(sid, data):
         # Daemons join rooms for input routing, not for
         # history — replaying history on daemon reconnect
         # floods the connection and causes a reconnect loop.
+        # The request goes to the agent's room, where its
+        # daemon listens, and names the requester so the
+        # replay reaches only this client instead of being
+        # repeated to everyone already watching.
         if not is_host:
             await sio.emit(
                 "request_history",
-                {"agent_id": agent_id},
+                {"agent_id": agent_id, "requester": sid},
+                room=agent_id,
                 namespace="/terminal",
             )
+
+
+@sio.on("leave_room", namespace="/terminal")
+async def handle_leave_room(sid, data):
+    """
+    Removes a client from an agent's room so it stops
+    receiving that agent's terminal output. Used by UI
+    clients that show several sessions over one connection.
+    data: {'room': 'agent_id'}
+    """
+    agent_id = (data or {}).get("room")
+    if agent_id:
+        await sio.leave_room(sid, agent_id, namespace="/terminal")
 
 
 @sio.on("request_projects", namespace="/terminal")
@@ -204,7 +224,12 @@ async def handle_history_complete(sid, data):
     """
     agent_id = data.get("agent_id")
     if agent_id:
-        await sio.emit("history_complete", data, room=agent_id, namespace="/terminal")
+        await sio.emit(
+            "history_complete",
+            {"agent_id": agent_id},
+            to=data.get("requester") or agent_id,
+            namespace="/terminal",
+        )
 
 
 @sio.on("terminal_resize", namespace="/terminal")

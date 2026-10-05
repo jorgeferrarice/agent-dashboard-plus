@@ -110,10 +110,25 @@ usage, model info, and session cost.
   <img src="docs/images/agent-dashboard_claude-session-window.png" alt="Claude Code session in a detached terminal window" width="800">
 </p>
 
-- **Detached terminal windows** — Attach to any session in a
-  standalone browser popup for side-by-side multitasking.
-- **Session history replay** — Close and re-attach to a terminal
-  window; recent output is automatically replayed.
+- **Session tabs** — Sessions open as tabs next to the Dashboard,
+  in one browser window. Only the tab you are looking at has a
+  live terminal and receives output; the others cost nothing, so
+  many can stay open. Closing a tab leaves the session running.
+  Open tabs are restored when the page reloads. `Alt+1` goes to
+  the Dashboard and `Alt+2`..`Alt+9` to the session tabs.
+- **Attention marks** — A tab is marked when its session waits for
+  a permission answer (red), finished working while you were not
+  looking (blue), or ended (amber). The page title shows the total,
+  the Dashboard tab counts sessions that have no tab, and the bell
+  turns on browser notifications for when the page is in the
+  background.
+- **Detached terminal windows** — The **Detach** button moves a
+  session from its tab to a standalone browser window for
+  side-by-side multitasking.
+- **Resume on request** — A session that ended is never respawned
+  on its own; its tab offers a **Resume** button.
+- **Session history replay** — Switch away from a session and come
+  back; recent output is automatically replayed.
 - **Dynamic resizing** — Terminals scale to match the browser
   viewport in real-time, relaying geometry changes to the
   remote PTY.
@@ -288,7 +303,7 @@ podman run -d --name host-daemon --network=host \
 3. Click **Spawn Claude**, **Spawn Pi**, **Spawn Antigravity**,
    **Spawn OpenCode**, **Spawn Codex**, or **Spawn Bash**
 4. Select a project directory from the dropdown
-5. Click a running session to attach in a terminal popup
+5. Click a running session to attach in a tab
 6. Delete retired hosts via the trash icon
 
 ## Architecture

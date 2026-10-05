@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   getHosts,
   getAgents,
@@ -12,7 +12,7 @@ import {
 import type { Host, Agent, VersionInfo } from '../api';
 import { normalizeToolInfo } from '../api';
 import { Cpu, Activity } from 'lucide-react';
-import { io } from 'socket.io-client';
+import { getSocket } from '../socket';
 import LogoSvg from './LogoSvg';
 import ThemeSelector from './ThemeSelector';
 import SpawnModal from './dashboard/SpawnModal';
@@ -20,9 +20,13 @@ import HostCard from './dashboard/HostCard';
 
 interface DashboardProps {
   onAttach: (agentId: string) => void;
+  /** Reports the active agents whenever they change, so the
+   *  workspace can label tabs and track attention without
+   *  fetching or subscribing a second time. */
+  onAgentsChange?: (agents: Agent[]) => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
+const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,7 +37,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
     tool: string;
   } | null>(null);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
-  const socketRef = useRef<ReturnType<typeof io> | null>(null);
+  const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
 
   // Fetch version info on mount
   const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
@@ -96,13 +100,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
   const handleStop = async (agentId: string) => {
     if (!window.confirm('Are you sure you want to stop this agent?')) return;
     try {
-      // Close the terminal popup window if it's open, before
-      // stopping the agent, to prevent the auto-reconnect
-      // from respawning it.
-      const popup = window.open('', `agent_${agentId}`);
-      if (popup && !popup.closed) {
-        popup.close();
-      }
+      // An open tab or window for this agent closes itself
+      // on the resulting "stopped" status event.
       await stopAgent(agentId);
       setTimeout(fetchData, 500);
     } catch (err) {
@@ -134,64 +133,65 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
 
   useEffect(() => {
     fetchData();
-    const baseURL =
-      import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
-    const socket = io(`${baseURL}/terminal`, {
-      path: '/socket.io',
-    });
+    // One connection for the whole page, shared with the
+    // terminal of the active tab.
+    const socket = getSocket();
     socketRef.current = socket;
 
-    socket.on('connect', () => {
+    const onConnect = () => {
       socket.emit('request_projects', {});
-    });
+    };
 
-    socket.on(
-      'agent_status_update',
-      (data: { agent_id: string; status: string }) => {
-        if (data.status === 'closed' || data.status === 'stopped') {
-          setAgents((prev) => prev.filter((a) => a.agent_id !== data.agent_id));
-        } else {
-          setAgents((prev) =>
-            prev.map((a) =>
-              a.agent_id === data.agent_id ? { ...a, status: data.status } : a,
-            ),
-          );
-        }
-      },
-    );
-
-    socket.on(
-      'agent_telemetry_update',
-      (data: { agent_id: string; telemetry: Agent['telemetry'] }) => {
-        setAgents((prev) => {
-          const exists = prev.some((a) => a.agent_id === data.agent_id);
-          if (!exists) {
-            // Agent not in state — likely spawned after
-            // a daemon reconnect cleared old records.
-            // Trigger a full fetch to pick up the new agent.
-            fetchData();
-            return prev;
-          }
-          return prev.map((a) =>
-            a.agent_id === data.agent_id
-              ? { ...a, telemetry: data.telemetry }
-              : a,
-          );
-        });
-      },
-    );
-
-    socket.on(
-      'host_telemetry_update',
-      (data: { host_id: number; telemetry: Host['projects'] }) => {
-        projectsCache.current[data.host_id] = data.telemetry;
-        setHosts((prev) =>
-          prev.map((h) =>
-            h.id === data.host_id ? { ...h, projects: data.telemetry } : h,
+    const onStatusUpdate = (data: { agent_id: string; status: string }) => {
+      if (data.status === 'closed' || data.status === 'stopped') {
+        setAgents((prev) => prev.filter((a) => a.agent_id !== data.agent_id));
+      } else {
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.agent_id === data.agent_id ? { ...a, status: data.status } : a,
           ),
         );
-      },
-    );
+      }
+    };
+
+    const onTelemetryUpdate = (data: {
+      agent_id: string;
+      telemetry: Agent['telemetry'];
+    }) => {
+      setAgents((prev) => {
+        const exists = prev.some((a) => a.agent_id === data.agent_id);
+        if (!exists) {
+          // Agent not in state — likely spawned after
+          // a daemon reconnect cleared old records.
+          // Trigger a full fetch to pick up the new agent.
+          fetchData();
+          return prev;
+        }
+        return prev.map((a) =>
+          a.agent_id === data.agent_id
+            ? { ...a, telemetry: data.telemetry }
+            : a,
+        );
+      });
+    };
+
+    const onHostTelemetryUpdate = (data: {
+      host_id: number;
+      telemetry: Host['projects'];
+    }) => {
+      projectsCache.current[data.host_id] = data.telemetry;
+      setHosts((prev) =>
+        prev.map((h) =>
+          h.id === data.host_id ? { ...h, projects: data.telemetry } : h,
+        ),
+      );
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('agent_status_update', onStatusUpdate);
+    socket.on('agent_telemetry_update', onTelemetryUpdate);
+    socket.on('host_telemetry_update', onHostTelemetryUpdate);
+    if (socket.connected) onConnect();
 
     // Poll as a safety net for missed socket events.
     // Socket.IO handles real-time updates; this catches
@@ -199,17 +199,24 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach }) => {
     const interval = setInterval(fetchData, 30000);
     return () => {
       clearInterval(interval);
-      socket.disconnect();
+      socket.off('connect', onConnect);
+      socket.off('agent_status_update', onStatusUpdate);
+      socket.off('agent_telemetry_update', onTelemetryUpdate);
+      socket.off('host_telemetry_update', onHostTelemetryUpdate);
     };
   }, []);
 
-  // Set browser window title
-  useEffect(() => {
-    document.title = 'Agent Dashboard';
-  }, []);
-
   // Sort hosts: online first, then alphabetical by name
-  const activeAgents = agents.filter((a) => a.status === 'active');
+  const activeAgents = useMemo(
+    () => agents.filter((a) => a.status === 'active'),
+    [agents],
+  );
+
+  useEffect(() => {
+    if (!loading) onAgentsChange?.(activeAgents);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- callback identity is irrelevant
+  }, [activeAgents, loading]);
+
   const sortedHosts = [...hosts].sort((a, b) => {
     if (a.status === 'online' && b.status !== 'online') return -1;
     if (a.status !== 'online' && b.status === 'online') return 1;

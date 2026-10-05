@@ -323,3 +323,107 @@ def test_socketio_relay_multiplex_e2e(live_server):
 
     host_sio.disconnect()
     ui_sio.disconnect()
+
+
+def _wait_for(predicate, tries=30):
+    """Polls a condition for up to ~3 seconds."""
+    for _ in range(tries):
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_history_replay_targets_requester_and_leave_room(live_server):
+    """History goes only to the client that attached; leave_room stops output."""
+    host_id = httpx.post(
+        f"{live_server}/hosts", json={"name": "hist-host", "host_token": "hist-token"}
+    ).json()["id"]
+
+    host_sio = socketio.Client()
+    history_requests = []
+
+    @host_sio.on("request_history", namespace="/terminal")
+    def on_history(data):
+        history_requests.append(data)
+
+    host_sio.connect(
+        live_server, namespaces=["/terminal"], headers={"x-host-token": "hist-token"}
+    )
+    agent_id = httpx.post(
+        f"{live_server}/agents/spawn",
+        json={"host_id": host_id, "tool_name": "bash"},
+    ).json()["agent_id"]
+    host_sio.emit("join_room", {"room": agent_id}, namespace="/terminal")
+    time.sleep(0.2)
+
+    outputs = {"first": [], "second": []}
+    completes = {"first": [], "second": []}
+    clients = {}
+    for name in ("first", "second"):
+        client = socketio.Client()
+        client.on(
+            "terminal_output",
+            lambda data, name=name: outputs[name].append(data["output"]),
+            namespace="/terminal",
+        )
+        client.on(
+            "history_complete",
+            lambda data, name=name: completes[name].append(data),
+            namespace="/terminal",
+        )
+        client.connect(live_server, namespaces=["/terminal"])
+        clients[name] = client
+
+    def replay(requester):
+        """Answers a history request the way the daemon does."""
+        host_sio.emit(
+            "terminal_output",
+            {"sid": agent_id, "output": "HISTORY", "requester": requester},
+            namespace="/terminal",
+        )
+        host_sio.emit(
+            "history_complete",
+            {"agent_id": agent_id, "requester": requester},
+            namespace="/terminal",
+        )
+
+    try:
+        clients["first"].emit("join_room", {"room": agent_id}, namespace="/terminal")
+        assert _wait_for(lambda: len(history_requests) == 1)
+        replay(history_requests[0]["requester"])
+        assert _wait_for(lambda: completes["first"])
+
+        # A second viewer attaching must not replay to the first.
+        clients["second"].emit("join_room", {"room": agent_id}, namespace="/terminal")
+        assert _wait_for(lambda: len(history_requests) == 2)
+        assert history_requests[1]["requester"] != history_requests[0]["requester"]
+        replay(history_requests[1]["requester"])
+        assert _wait_for(lambda: completes["second"])
+        time.sleep(0.3)
+        assert outputs == {"first": ["HISTORY"], "second": ["HISTORY"]}
+        assert len(completes["first"]) == 1
+
+        # Live output still reaches every viewer in the room.
+        host_sio.emit(
+            "terminal_output",
+            {"sid": agent_id, "output": "LIVE"},
+            namespace="/terminal",
+        )
+        assert _wait_for(lambda: "LIVE" in outputs["second"])
+        assert "LIVE" in outputs["first"]
+
+        # After leaving, a viewer gets no more output.
+        clients["first"].emit("leave_room", {"room": agent_id}, namespace="/terminal")
+        time.sleep(0.3)
+        host_sio.emit(
+            "terminal_output",
+            {"sid": agent_id, "output": "AFTER"},
+            namespace="/terminal",
+        )
+        assert _wait_for(lambda: "AFTER" in outputs["second"])
+        time.sleep(0.3)
+        assert "AFTER" not in outputs["first"]
+    finally:
+        for client in (*clients.values(), host_sio):
+            client.disconnect()
