@@ -42,3 +42,21 @@ agent/Containerfile
 # Local Agent Configs
 .claude/settings.local.json
 .coverage
+
+# Secrets and machine-specific files. Never commit these:
+# .env holds SECRET_KEY, HOST_TOKEN and OIDC credentials
+# (see .env.example for the keys).
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.key
+agent/profiles/*.local.yaml
+.claude/
+.beads/
+.dolt/
+.beads-credential-key
+
+# Local scratch files
+/uv.lock

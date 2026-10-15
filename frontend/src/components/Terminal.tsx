@@ -11,6 +11,11 @@ import {
   ExternalLink,
   RefreshCw,
   SquareArrowOutUpRight,
+  SendHorizontal,
+  TextSelect,
+  Copy,
+  X,
+  Upload,
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import type { AgentDetail, Agent, ToolInfo } from '../api';
@@ -20,6 +25,7 @@ import {
   spawnAgent,
   stopAgent,
   normalizeToolInfo,
+  uploadFile,
 } from '../api';
 import { getToolColorsByKeyword } from './dashboard/utils';
 import { openTerminalWindow } from './terminalWindow';
@@ -73,6 +79,129 @@ const TOOL_LABELS: Record<ToolCategory, string> = {
   unknown: 'Agent',
 };
 
+/** Largest file a session accepts. Keep in sync with
+ *  MAX_UPLOAD_BYTES in backend/app/main.py. */
+const MAX_UPLOAD_MB = 90;
+
+/** Why an upload failed, in words the user can act on. */
+function uploadErrorText(err: unknown): string {
+  const res = (
+    err as { response?: { status?: number; data?: { detail?: unknown } } }
+  ).response;
+  if (typeof res?.data?.detail === 'string') return res.data.detail;
+  if (res?.status === 413) return `larger than ${MAX_UPLOAD_MB} MB.`;
+  if (res?.status) return `the server answered ${res.status}.`;
+  // No answer at all: the browser could not read the item
+  // (a folder, or a file it has no access to) or the
+  // connection dropped.
+  return 'could not be read or sent. Folders are not supported.';
+}
+
+/** Whether the primary input is a finger. */
+const isTouch = () => !!window.matchMedia?.('(pointer: coarse)').matches;
+
+/** Keys a phone keyboard lacks, as sent to the PTY. */
+const MOBILE_KEYS: { label: string; input: string; title: string }[] = [
+  { label: 'Esc', input: '\x1b', title: 'Escape' },
+  { label: 'Tab', input: '\t', title: 'Tab' },
+  { label: '⇧Tab', input: '\x1b[Z', title: 'Shift+Tab' },
+  { label: '↑', input: '\x1b[A', title: 'Up' },
+  { label: '↓', input: '\x1b[B', title: 'Down' },
+  { label: '←', input: '\x1b[D', title: 'Left' },
+  { label: '→', input: '\x1b[C', title: 'Right' },
+  { label: '^C', input: '\x03', title: 'Ctrl+C' },
+  { label: '^D', input: '\x04', title: 'Ctrl+D' },
+  { label: '^R', input: '\x12', title: 'Ctrl+R' },
+  { label: '/', input: '/', title: 'Slash' },
+  { label: '⌫', input: '\x7f', title: 'Backspace' },
+  { label: '⏎', input: '\r', title: 'Enter' },
+];
+
+/**
+ * Touch input bar: the special keys a phone keyboard lacks,
+ * and a text field that gets the phone's autocorrect and
+ * dictation. Sending submits the text with Enter; sending an
+ * empty field presses Enter.
+ */
+const MobileInputBar: React.FC<{
+  send: (input: string) => void;
+  onShowText: () => void;
+}> = ({ send, onShowText }) => {
+  const [text, setText] = useState('');
+  const submit = () => {
+    if (text) {
+      // Multi-line text goes as one bracketed paste so each
+      // newline is not taken as Enter. Enter follows on its
+      // own so the agent does not fold it into the paste.
+      send(text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text);
+      setTimeout(() => send('\r'), 80);
+      setText('');
+    } else {
+      send('\r');
+    }
+  };
+  return (
+    <div className="hidden pointer-coarse:block shrink-0 bg-slate-900 border-t border-slate-700">
+      <div className="flex gap-1 px-1 pt-1 overflow-x-auto">
+        {MOBILE_KEYS.map((k) => (
+          <button
+            key={k.title}
+            type="button"
+            title={k.title}
+            aria-label={k.title}
+            // Keep the focus (and the keyboard) where it is.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => send(k.input)}
+            className="shrink-0 min-w-11 h-9 px-2 rounded-md bg-slate-800 active:bg-slate-600 text-slate-200 text-sm font-mono border border-slate-700"
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+      <form
+        className="flex items-end gap-1 p-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <button
+          type="button"
+          onClick={onShowText}
+          aria-label="Select text"
+          title="Show the screen as text to select and copy"
+          className="shrink-0 w-11 h-10 rounded-md bg-slate-800 active:bg-slate-600 text-slate-300 border border-slate-700 flex items-center justify-center"
+        >
+          <TextSelect size={18} />
+        </button>
+        <textarea
+          rows={1}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          enterKeyHint="send"
+          placeholder="Type a message…"
+          aria-label="Message to the session"
+          className="flex-1 min-w-0 min-h-10 max-h-28 [field-sizing:content] resize-none bg-slate-800 border border-slate-700 rounded-md px-2 py-1.5 text-slate-50 focus:outline-none focus:border-accent"
+        />
+        <button
+          type="submit"
+          onMouseDown={(e) => e.preventDefault()}
+          aria-label={text ? 'Send' : 'Press Enter'}
+          className="shrink-0 w-11 h-10 rounded-md bg-accent active:bg-accent-hover text-accent-text flex items-center justify-center"
+        >
+          <SendHorizontal size={18} />
+        </button>
+      </form>
+    </div>
+  );
+};
+
 const Terminal: React.FC<TerminalProps> = ({
   agentId,
   onClose,
@@ -98,6 +227,15 @@ const Terminal: React.FC<TerminalProps> = ({
   const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
   const [companions, setCompanions] = useState<Agent[]>([]);
   const [spawning, setSpawning] = useState(false);
+  // The screen as plain text, shown for touch selection.
+  const [screenText, setScreenText] = useState<string | null>(null);
+
+  // Files dragged over the terminal, and how sending them went.
+  const [dragging, setDragging] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<{
+    text: string;
+    error?: boolean;
+  } | null>(null);
 
   // Stale session reconnect state
   const [sessionLost, setSessionLost] = useState(ended);
@@ -263,7 +401,8 @@ const Terminal: React.FC<TerminalProps> = ({
       },
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 14,
+      // Phones get more columns out of a narrow screen.
+      fontSize: window.innerWidth < 640 ? 12 : 14,
       allowProposedApi: true,
     });
 
@@ -271,7 +410,9 @@ const Terminal: React.FC<TerminalProps> = ({
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
-    term.focus();
+    // On a phone, focusing would pop the keyboard over the
+    // output; a tap on the terminal focuses it.
+    if (!isTouch()) term.focus();
 
     // Enable bracketed paste mode so multi-line pastes
     // are wrapped in ESC[200~ / ESC[201~ sequences.
@@ -377,15 +518,32 @@ const Terminal: React.FC<TerminalProps> = ({
     requestAnimationFrame(performFit);
     xtermRef.current = term;
 
+    const LINE_HEIGHT_PX = 18; // approx pixel height per row
+
+    // Scrolls tmux's buffer by sending SGR mouse wheel
+    // sequences (see the wheel handler below), one per step,
+    // capped to avoid flooding the PTY. Positive is down.
+    const sendWheel = (steps: number) => {
+      if (steps === 0 || !socketRef.current?.connected) return;
+      const button = steps > 0 ? 65 : 64; // down : up
+      const count = Math.min(Math.abs(steps), 10);
+      socketRef.current.emit('terminal_input', {
+        target_sid: agentId,
+        input: `\x1b[<${button};1;1M`.repeat(count),
+      });
+    };
+
     // --- Touch scrolling ---
     // xterm.js intercepts touch events with {passive: false}
     // and calls preventDefault(), blocking the browser's
     // native scroll.  We attach our own handler on the
-    // xterm-screen element (capture phase) to translate
-    // vertical swipe gestures into term.scrollLines() calls.
+    // xterm-screen element to translate vertical swipes into
+    // wheel steps for tmux: xterm.js has no scrollback of
+    // its own to scroll.
     let touchStartY: number | null = null;
     let touchAccum = 0;
-    const LINE_HEIGHT_PX = 18; // approx pixel height per row
+    // tmux scrolls several lines per wheel step.
+    const TOUCH_STEP_PX = 40;
 
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length === 1) {
@@ -399,10 +557,10 @@ const Terminal: React.FC<TerminalProps> = ({
       touchStartY = e.touches[0].clientY;
       touchAccum += deltaY;
 
-      const lines = Math.trunc(touchAccum / LINE_HEIGHT_PX);
-      if (lines !== 0) {
-        term.scrollLines(lines);
-        touchAccum -= lines * LINE_HEIGHT_PX;
+      const steps = Math.trunc(touchAccum / TOUCH_STEP_PX);
+      if (steps !== 0) {
+        sendWheel(steps);
+        touchAccum -= steps * TOUCH_STEP_PX;
       }
       // Prevent the page itself from scrolling
       e.preventDefault();
@@ -436,38 +594,29 @@ const Terminal: React.FC<TerminalProps> = ({
     // application mouse mode.  This means the browser
     // handles text selection and right-click natively.
     //
-    // Since xterm.js doesn't know about mouse tracking,
-    // wheel events stay in the browser.  We intercept
-    // them and send synthesized SGR mouse wheel escape
-    // sequences to tmux via Socket.IO.  tmux processes
-    // these as scroll events in its scrollback buffer.
+    // Without mouse tracking and without scrollback,
+    // xterm.js turns wheel events into arrow keys, which
+    // the agent CLI reads as prompt history navigation.
+    // We take over the wheel instead and send synthesized
+    // SGR mouse wheel escape sequences to tmux via
+    // Socket.IO.  tmux processes these as scroll events
+    // in its scrollback buffer.
     //
     // SGR (mode 1006) mouse wheel format:
     //   \x1b[<64;col;rowM  = wheel up
     //   \x1b[<65;col;rowM  = wheel down
-    const onWheel = (e: WheelEvent) => {
+    //
+    // Trackpads send many small pixel deltas, so they are
+    // accumulated until they add up to whole steps.
+    let wheelAccum = 0;
+    term.attachCustomWheelEventHandler((e) => {
       e.preventDefault();
-      if (!socketRef.current?.connected) return;
-      const lines = Math.round(e.deltaY / LINE_HEIGHT_PX);
-      if (lines === 0) return;
-      // Send SGR mouse wheel sequences — one per line,
-      // capped to avoid flooding the PTY.
-      const button = lines > 0 ? 65 : 64; // down : up
-      const count = Math.min(Math.abs(lines), 10);
-      let input = '';
-      for (let i = 0; i < count; i++) {
-        input += `\x1b[<${button};1;1M`;
-      }
-      socketRef.current.emit('terminal_input', {
-        target_sid: agentId,
-        input,
-      });
-    };
-    if (screenEl) {
-      screenEl.addEventListener('wheel', onWheel, {
-        passive: false,
-      });
-    }
+      wheelAccum += e.deltaMode === 1 ? e.deltaY * LINE_HEIGHT_PX : e.deltaY;
+      const steps = Math.trunc(wheelAccum / LINE_HEIGHT_PX);
+      wheelAccum -= steps * LINE_HEIGHT_PX;
+      sendWheel(steps);
+      return false; // never let xterm.js send arrow keys
+    });
 
     // --- Output batching ---
     // Buffer rapid successive terminal_output events and
@@ -662,7 +811,6 @@ const Terminal: React.FC<TerminalProps> = ({
         screenEl.removeEventListener('touchstart', onTouchStart);
         screenEl.removeEventListener('touchmove', onTouchMove);
         screenEl.removeEventListener('touchend', onTouchEnd);
-        screenEl.removeEventListener('wheel', onWheel);
       }
       socket.off('disconnect', onDisconnect);
       socket.off('connect', onConnect);
@@ -679,6 +827,80 @@ const Terminal: React.FC<TerminalProps> = ({
       term.dispose();
     };
   }, [agentId, sharedSocket]);
+
+  // xterm.js text cannot be selected by touch: show the
+  // screen as plain text the phone can select natively.
+  // Wrapped rows are joined so long links stay whole.
+  const showScreenText = useCallback(() => {
+    const buf = xtermRef.current?.buffer.active;
+    if (!buf) return;
+    const lines: string[] = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    setScreenText(lines.join('\n').trimEnd());
+  }, []);
+
+  const sendInput = useCallback(
+    (input: string) => {
+      socketRef.current?.emit('terminal_input', { target_sid: agentId, input });
+    },
+    [agentId],
+  );
+
+  // Files dropped on the terminal are saved on the session's
+  // host, then their paths are pasted at the prompt, as a
+  // desktop terminal does. Enter is left to the user.
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragging(false);
+      // Some drag sources fill only `items`, not `files`.
+      let files = Array.from(e.dataTransfer.files);
+      if (!files.length) {
+        files = Array.from(e.dataTransfer.items ?? [])
+          .filter((item) => item.kind === 'file')
+          .map((item) => item.getAsFile())
+          .filter((file): file is File => !!file);
+      }
+      if (!files.length) {
+        console.error('Drop carried no file:', e.dataTransfer.types);
+        setUploadStatus({
+          text: 'The browser handed over no file. Drag it from a file manager.',
+          error: true,
+        });
+        return;
+      }
+      setUploadStatus({
+        text: `Sending ${files.length === 1 ? files[0].name : `${files.length} files`}…`,
+      });
+      const paths: string[] = [];
+      let error: string | null = null;
+      for (const file of files) {
+        if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+          error = `${file.name}: larger than ${MAX_UPLOAD_MB} MB.`;
+          continue;
+        }
+        try {
+          paths.push(await uploadFile(agentId, file));
+        } catch (err) {
+          console.error('Upload failed:', err);
+          error = `${file.name}: ${uploadErrorText(err)}`;
+        }
+      }
+      if (paths.length) {
+        sendInput(`\x1b[200~${paths.join(' ')} \x1b[201~`);
+        xtermRef.current?.focus();
+      }
+      // An error stays until clicked or the next drop.
+      setUploadStatus(error ? { text: error, error: true } : null);
+    },
+    [agentId, sendInput],
+  );
 
   // Derived header values
   const category = categorize(agentDetail?.tool_name);
@@ -724,9 +946,9 @@ const Terminal: React.FC<TerminalProps> = ({
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-black overflow-hidden">
       {/* Header Bar */}
-      <div className="h-12 flex items-center justify-between bg-slate-800 border-b border-slate-700 px-4 shrink-0 overflow-hidden">
+      <div className="h-11 sm:h-12 flex items-center justify-between gap-2 bg-slate-800 border-b border-slate-700 px-2 sm:px-4 shrink-0 overflow-hidden">
         {/* Left side: tool badge + context */}
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
           {/* Tool badge */}
           <span
             className={`${toolBadgeColor} text-white text-[10px] font-bold uppercase px-2 py-0.5 rounded tracking-wider shrink-0`}
@@ -735,27 +957,29 @@ const Terminal: React.FC<TerminalProps> = ({
           </span>
 
           {/* Host / project / branch */}
-          <div className="flex items-center gap-2 text-xs text-slate-300 font-mono truncate">
+          <div className="flex items-center gap-2 text-xs text-slate-300 font-mono min-w-0 overflow-hidden">
             {hostName && (
-              <>
+              <span className="hidden sm:contents">
                 <Monitor size={12} className="text-slate-400 shrink-0" />
                 <span className="text-slate-200">{hostName}</span>
-              </>
+              </span>
             )}
             {gitProject && (
               <>
-                <span className="text-slate-600">/</span>
+                <span className="hidden sm:inline text-slate-600">/</span>
                 {gitRemoteUrl ? (
                   <a
                     href={gitRemoteUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-white font-semibold hover:underline"
+                    className="text-white font-semibold hover:underline truncate min-w-0"
                   >
                     {gitProject}
                   </a>
                 ) : (
-                  <span className="text-white font-semibold">{gitProject}</span>
+                  <span className="text-white font-semibold truncate min-w-0">
+                    {gitProject}
+                  </span>
                 )}
               </>
             )}
@@ -763,33 +987,40 @@ const Terminal: React.FC<TerminalProps> = ({
               <>
                 <GitBranch
                   size={12}
-                  className="text-emerald-400 shrink-0 ml-1"
+                  className="hidden sm:block text-emerald-400 shrink-0 ml-1"
                 />
                 {gitRemoteUrl ? (
                   <a
                     href={`${gitRemoteUrl}/tree/${gitBranch}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-emerald-300 hover:underline"
+                    className="hidden sm:block text-emerald-300 hover:underline truncate min-w-0"
                   >
                     {gitBranch}
                   </a>
                 ) : (
-                  <span className="text-emerald-300">{gitBranch}</span>
+                  <span className="hidden sm:block text-emerald-300 truncate min-w-0">
+                    {gitBranch}
+                  </span>
                 )}
               </>
             )}
             {worktreePath && (
               <>
-                <GitFork size={12} className="text-amber-400 shrink-0 ml-1" />
-                <span className="text-amber-300">worktree</span>
+                <GitFork
+                  size={12}
+                  className="hidden sm:block text-amber-400 shrink-0 ml-1"
+                />
+                <span className="text-amber-300 hidden sm:inline">
+                  worktree
+                </span>
               </>
             )}
           </div>
         </div>
 
         {/* Right side: companion + close buttons */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {companionButtons.map((btn) => {
             const existing = companions.find((c) => c.tool_name === btn.tool);
             return (
@@ -797,7 +1028,10 @@ const Terminal: React.FC<TerminalProps> = ({
                 key={btn.tool}
                 onClick={() => handleOpenCompanion(btn.tool)}
                 disabled={spawning}
-                className="flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium disabled:opacity-50"
+                className="shrink-0 flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium disabled:opacity-50"
+                aria-label={
+                  existing ? `Attach ${btn.label}` : `Open ${btn.label}`
+                }
                 title={
                   existing
                     ? `Attach to existing ${btn.label} session`
@@ -809,18 +1043,20 @@ const Terminal: React.FC<TerminalProps> = ({
                 ) : (
                   <TerminalSquare size={12} />
                 )}
-                <span>
+                <span className="hidden md:inline">
                   {existing ? `Attach ${btn.label}` : `Open ${btn.label}`}
                 </span>
+                <span className="md:hidden">{btn.label}</span>
               </button>
             );
           })}
 
           {onDetach && (
+            // Touch devices have no separate windows.
             <button
               onClick={onDetach}
               title="Move this session to its own window"
-              className="flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium"
+              className="hidden md:pointer-fine:flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium"
             >
               <SquareArrowOutUpRight size={12} />
               <span>Detach</span>
@@ -829,10 +1065,11 @@ const Terminal: React.FC<TerminalProps> = ({
 
           <button
             onClick={onClose}
-            className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-3 py-1.5 rounded-md transition-colors border border-red-500/20 cursor-pointer"
+            aria-label={embedded ? 'Close Tab' : 'Close Window'}
+            className="shrink-0 flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-3 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-red-500/20 cursor-pointer"
           >
             <XCircle size={14} />
-            <span className="font-semibold text-xs">
+            <span className="hidden sm:inline font-semibold text-xs">
               {embedded ? 'Close Tab' : 'Close Window'}
             </span>
           </button>
@@ -840,7 +1077,24 @@ const Terminal: React.FC<TerminalProps> = ({
       </div>
 
       {/* Terminal Container */}
-      <div className="flex-1 flex flex-col h-full min-h-0 bg-black p-2 overflow-hidden relative">
+      <div
+        className="flex-1 flex flex-col h-full min-h-0 bg-black p-1 sm:p-2 overflow-hidden relative"
+        onDragOver={(e) => {
+          // Only files: dragged text keeps its default.
+          if (sessionLost || !e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+            setDragging(false);
+        }}
+        onDrop={(e) => {
+          if (!sessionLost && e.dataTransfer.types.includes('Files'))
+            handleDrop(e);
+        }}
+      >
         <div className="flex-1 h-full min-h-0">
           <div
             ref={terminalRef}
@@ -848,6 +1102,69 @@ const Terminal: React.FC<TerminalProps> = ({
             style={{ height: '100%' }}
           />
         </div>
+
+        {dragging && (
+          <div className="absolute inset-1 z-30 flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent bg-black/70 text-slate-100 text-sm pointer-events-none">
+            <Upload size={18} /> Drop files to send them to this session
+          </div>
+        )}
+
+        {uploadStatus && (
+          <div
+            role={uploadStatus.error ? 'alert' : 'status'}
+            onClick={() => setUploadStatus(null)}
+            title={uploadStatus.error ? 'Click to dismiss' : undefined}
+            className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[90%] truncate px-4 py-2 rounded-md text-sm font-medium border shadow-lg cursor-pointer ${
+              uploadStatus.error
+                ? 'bg-red-950 text-red-300 border-red-500/40'
+                : 'bg-slate-800 text-slate-200 border-slate-600'
+            }`}
+          >
+            {uploadStatus.text}
+          </div>
+        )}
+
+        {screenText !== null && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-slate-950">
+            <div className="flex items-center gap-2 px-2 py-1 border-b border-slate-700 shrink-0">
+              <span className="flex-1 text-xs text-slate-400">
+                Press and hold to select
+              </span>
+              <button
+                onClick={() =>
+                  navigator.clipboard?.writeText(screenText).catch(() => {})
+                }
+                className="flex items-center gap-1.5 h-9 px-3 rounded-md bg-slate-800 active:bg-slate-600 text-slate-200 text-xs border border-slate-700"
+              >
+                <Copy size={14} /> Copy all
+              </button>
+              <button
+                onClick={() => setScreenText(null)}
+                aria-label="Back to the terminal"
+                className="flex items-center justify-center h-9 w-11 rounded-md bg-accent text-accent-text"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-2 text-xs leading-relaxed text-slate-100 font-mono whitespace-pre-wrap break-all select-text">
+              {screenText.split(/(https?:\/\/[^\s"'<>]+)/).map((part, i) =>
+                i % 2 ? (
+                  <a
+                    key={i}
+                    href={part}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sky-400 underline"
+                  >
+                    {part}
+                  </a>
+                ) : (
+                  part
+                ),
+              )}
+            </pre>
+          </div>
+        )}
 
         {/* Shown when the session ended or can no longer be
             reached. It is resumed only on request. */}
@@ -888,6 +1205,10 @@ const Terminal: React.FC<TerminalProps> = ({
           </div>
         )}
       </div>
+
+      {!sessionLost && (
+        <MobileInputBar send={sendInput} onShowText={showScreenText} />
+      )}
     </div>
   );
 };

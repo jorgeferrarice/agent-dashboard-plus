@@ -6,6 +6,7 @@ Defines Host, Agent, and Log tables with their relationships.
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     String,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -34,11 +36,60 @@ class Host(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     agents = relationship("Agent", back_populates="host", cascade="all, delete-orphan")
+    tool_settings = relationship(
+        "HostToolSetting", back_populates="host", cascade="all, delete-orphan"
+    )
 
     @property
     def projects(self):
         """Returns the cached project list JSON."""
         return self.last_projects_json
+
+
+class HostToolSetting(Base):
+    """
+    What the user chose for one AI tool on one host: whether it
+    is offered there, and under which name.
+
+    A row exists only for tools the user touched. A tool with
+    no row is enabled and uses the name its profile gives it.
+    Rows outlive the tool being detected, so the choice comes
+    back if the tool is reinstalled.
+    """
+
+    __tablename__ = "host_tool_settings"
+    __table_args__ = (UniqueConstraint("host_id", "tool"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    host_id = Column(Integer, ForeignKey("hosts.id"), nullable=False, index=True)
+    # Profile name the daemon reports, e.g. "claude-work".
+    tool = Column(String, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    # Name shown on the spawn button; None for the default.
+    label = Column(String, nullable=True)
+
+    host = relationship("Host", back_populates="tool_settings")
+
+
+class UserTabs(Base):
+    """
+    The session tabs one UI user has open, in display order.
+
+    Kept on the server so the same tabs, in the same order, show
+    up on every device the user signs in from. There is no users
+    table: the row is keyed by the email of the OIDC login.
+    """
+
+    __tablename__ = "user_tabs"
+
+    email = Column(String, primary_key=True)
+    # Ordered list of agent_id strings.
+    tabs_json = Column(JSON, nullable=False, default=list)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Agent(Base):

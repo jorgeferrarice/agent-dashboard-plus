@@ -14,6 +14,7 @@ import socketio
 from itsdangerous import TimestampSigner, BadSignature
 
 from . import database, models
+from .auth import is_allowed
 
 # Initialize the AsyncServer with ASGI support and CORS
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
@@ -81,7 +82,7 @@ async def connect(sid, environ, auth):
         bypass = os.getenv("BYPASS_AUTH", "false").lower() == "true"
         if not bypass:
             session = _validate_session_cookie(environ)
-            if not session or "user" not in session:
+            if not session or not is_allowed(session.get("user")):
                 return False
         return True
 

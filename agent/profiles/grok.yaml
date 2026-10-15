@@ -1,0 +1,49 @@
+# Grok Build CLI agent profile
+# xAI's terminal coding agent. Installed in the image by
+# Containerfile.template (native binary, not npm).
+name: grok
+display_name: Grok
+color: cyan
+binary: grok
+
+commands:
+  new: ["grok"]
+  resume: ["bash", "-c", "grok --continue || grok"]
+
+env: {}
+
+# No auth gate — Grok stores OAuth credentials in
+# ~/.grok/auth.json. Binary presence is sufficient.
+
+# Accounts. Every ~/.grok* directory holding a login is
+# offered as its own tool, started with GROK_HOME pointing
+# at it (~/.grok-work becomes "grok-work").
+config_dirs:
+  env: GROK_HOME
+  glob: "~/.grok*"
+  default: "~/.grok"
+  login_file: auth.json
+
+# Plan limits. Grok has them but shows them nowhere the daemon
+# can read (`grok usage` reports tokens and cost per session,
+# not the allowance). No parser: the UI says "unavailable".
+usage: {}
+
+mcp:
+  project_file: .mcp.json
+  user_files:
+    - ~/.grok/config.toml
+
+permission_patterns:
+  - "Allow"
+  - "approve"
+
+# Build-time provisioning metadata
+provisioning:
+  verify: "grok --version"
+  mounts:
+    - host: "~/.grok"
+      container: "/root/.grok"
+      mode: rw
+  passthrough_env:
+    - XAI_API_KEY

@@ -86,6 +86,8 @@ podman run -d --name host-daemon --network=host \
 | `PROJECTS_DEPTH` | Max scan depth below each `PROJECTS_ROOT` entry | `6` |
 | `PROJECTS_FOLDER_DEPTH` | Max depth at which a plain folder (no `.git`) is listed as a project. `0` lists git repositories only | `0` |
 | `NEW_PROJECTS_DIR` | Directory where folders created from the spawn dialog are placed | first `PROJECTS_ROOT` entry |
+| `USAGE_POLL_SECONDS` | Seconds between readings of each AI account's plan limits (see [Plan limits](#plan-limits)). `0` turns them off. | `300` |
+| `USAGE_PROBE_DIR` | Empty folder the tools are opened in to be asked for their limits | `~/.cache/agent-dashboard/usage-probe` |
 | `OTLP_DEBUG` | Set to any value to log raw OTLP payloads for troubleshooting | — |
 | `GEMINI_API_KEY` | API key for Gemini CLI (if installed) | — |
 | `CLAUDE_CODE_USE_VERTEX` | Set to `1` to use Vertex AI for Claude | — |
@@ -93,6 +95,60 @@ podman run -d --name host-daemon --network=host \
 | `ANTHROPIC_VERTEX_PROJECT_ID` | GCP project ID for Vertex AI | — |
 | `GH_TOKEN` | GitHub CLI personal access token | — |
 | `GITLAB_TOKEN` | GitLab CLI personal access token | — |
+
+## Plan limits
+
+Every five minutes the daemon reads how much of each AI
+account's plan allowance is used, and the dashboard shows it on
+the host card: a bar for the five hour window and one for the
+week, per account. Click or tap an account to see every limit
+the tool reports, when each resets and how old the reading is.
+
+| Tool | How it is read |
+|------|----------------|
+| Claude Code | `/usage` screen, once per account directory |
+| Codex | `/status` screen, once per account directory |
+| Grok | Not readable: the card says "limit unavailable" |
+
+**How it works, and what it costs you.** These tools only show
+their limits inside their interactive screen; there is no
+command that prints them. So the daemon opens the tool in a
+hidden terminal (its own `tmux` server, separate from your
+sessions), types the command, reads the percentages off the
+screen and closes the tool again. This takes about five seconds
+per account. You should know that:
+
+- The tool is really started, so its global hooks and MCP
+  servers start too, for those few seconds, every five minutes.
+- It is started in an empty folder of the daemon's own
+  (`USAGE_PROBE_DIR`), never in one of your projects. Claude
+  asks once whether that folder is trusted; the daemon answers
+  yes, for that folder only.
+- No prompt is sent to a model, so a reading uses none of your
+  allowance.
+- Only percentages and reset times leave the host. Credentials
+  are never read, sent or logged.
+- It reads the screen, so it can stop working when a tool
+  changes its layout. When a reading fails, the card keeps the
+  last values, dimmed, with their age ("23 min ago"), and tries
+  again at the next interval. An account that was never read
+  says "limit unavailable".
+
+`tmux` must be installed where the daemon runs (the container
+image has it). To change the interval set `USAGE_POLL_SECONDS`;
+set it to `0` to turn the readings off.
+
+Adding a tool means a `usage` section in its profile and, for a
+new screen layout, a parser in `agent/usage_probe.py`:
+
+```yaml
+usage:
+  parser: claude        # screen reader; leave out for "unavailable"
+  keys: /usage          # what to type
+  prompts:              # start-up questions, each answered once
+    - match: "Yes, I trust this folder"
+      keys: ["Down", "Enter"]
+```
 
 ## Volume Mounts
 
@@ -272,6 +328,60 @@ RestartSec=5
 The daemon has built-in error recovery for background tasks,
 but defense-in-depth restart ensures availability even for
 unhandled edge cases.
+
+## Restarting the Daemon from the Dashboard
+
+Each host card has a **Restart** button. It asks the host's
+daemon to shut down; whatever supervises the daemon starts a
+new one. A confirmation dialog comes first, because the
+restart **ends every session on that host**: the daemon
+closes their tmux sessions as it stops. Conversations of
+tools that support it can be resumed afterwards.
+
+Use it when sessions stop showing output and the daemon
+needs a fresh start.
+
+The daemon exits cleanly (exit code 0), so the supervisor
+must restart it on any exit, not only on failures:
+
+- **macOS LaunchAgent**: `<key>KeepAlive</key><true/>` (as in
+  `scripts/run-daemon-native.sh`'s LaunchAgent).
+- **systemd**: `Restart=always` instead of `Restart=on-failure`.
+- **Container**: `--restart=always` or `restart: always`.
+
+Without that, the button stops the daemon and the host stays
+offline until you start it by hand.
+
+## Sending Files to a Session
+
+Drag one or more files from your computer onto a session's terminal
+and drop them. The dashboard saves each file on the host the session
+runs on and pastes its path at the prompt, exactly as a desktop
+terminal does when you drop a file on it. Nothing is submitted: type
+your request around the path and press Enter. This works the same for
+Claude Code (any model), Codex, Grok and Bash, because the tool only
+ever sees a path typed into its terminal.
+
+- **Where files go:** `<system temp dir>/agent-dashboard-uploads/<agent_id>/`
+  on the host (inside the container, for a containerized daemon). The
+  folder is outside the project, so the files never show up in git.
+- **Read permission:** the folder is outside the session's working
+  directory, so a tool that asks before reading outside it (Claude
+  Code does) asks once per file or folder.
+- **Lifetime:** the folder is deleted when the session ends. A resumed
+  session is a new session: send the file again if it is still needed.
+- **Names:** only the file name is kept, and every character other than
+  letters, digits, `.`, `_` and `-` becomes `_`, so the path needs no
+  quoting. A file is never overwritten; a second `a.txt` is saved as
+  `1-a.txt`.
+- **Size limit:** 90 MB per file (`MAX_UPLOAD_BYTES` in
+  `agent/host_daemon.py` and `backend/app/main.py`, and
+  `client_max_body_size` in `frontend/nginx.conf`).
+
+For developers: the browser posts the file to
+`POST /agents/{agent_id}/files` (OIDC-protected), the backend relays it
+to the owning daemon as one `upload_file` Socket.IO call, and the
+daemon's `save_upload` writes it and answers with the path.
 
 ## Projects: Git Repositories and Plain Folders
 

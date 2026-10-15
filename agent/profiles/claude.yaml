@@ -20,6 +20,34 @@ env:
 # so binary presence is sufficient. If the user isn't
 # authenticated, Claude will prompt at startup.
 
+# Accounts. Every ~/.claude* directory holding a signed-in
+# account is offered as its own tool, started with
+# CLAUDE_CONFIG_DIR pointing at it (~/.claude-work becomes
+# "claude-work"). ~/.claude is this profile itself. Claude
+# keeps the account in .claude.json: inside the directory,
+# or in the home directory for the default one.
+config_dirs:
+  env: CLAUDE_CONFIG_DIR
+  glob: "~/.claude*"
+  default: "~/.claude"
+  login_file: .claude.json
+  default_login_file: "~/.claude.json"
+  login_key: oauthAccount
+  # Sessions started as the old hand-written profile.
+  aliases:
+    claude-infinitum: claude-infinite
+
+# Plan limits. The daemon opens Claude in an empty folder of
+# its own, types /usage and reads the screen (see
+# agent/usage_probe.py). The first time, Claude asks whether
+# the folder is trusted, with "No, exit" selected.
+usage:
+  parser: claude
+  keys: /usage
+  prompts:
+    - match: "Yes, I trust this folder"
+      keys: ["Down", "Enter"]
+
 mcp:
   project_file: .mcp.json
   user_files:

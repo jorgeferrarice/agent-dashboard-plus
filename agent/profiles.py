@@ -10,8 +10,10 @@ throughout the daemon's lifecycle to drive tool-specific
 behavior without hardcoded if/elif branches.
 """
 
+import glob
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 import yaml
@@ -94,6 +96,70 @@ class ModelsConfig:
 
 
 @dataclass
+class ConfigDirsConfig:
+    """Where a tool keeps its per-account configuration.
+
+    A tool that can be pointed at another configuration
+    directory by an environment variable can run several
+    accounts side by side. The daemon looks for such
+    directories and offers each one as its own tool (a
+    "variant" of the profile).
+
+    Attributes:
+        env: Variable that selects the directory, e.g.
+            ``CLAUDE_CONFIG_DIR``.
+        glob: Pattern matching candidate directories, e.g.
+            ``~/.claude*``.
+        default: Directory the tool uses when ``env`` is not
+            set. It belongs to the profile itself, not to a
+            variant.
+        login_file: File, relative to a directory, that exists
+            once an account is signed in there.
+        default_login_file: Path of that file for ``default``,
+            when the tool keeps it elsewhere. Defaults to
+            ``login_file`` inside ``default``.
+        login_key: When set, ``login_file`` is JSON and only
+            counts as a login if it has this top-level key.
+        aliases: Old tool names, mapped to the variant name
+            that replaced them, so existing sessions resume.
+    """
+
+    env: str = ""
+    glob: str = ""
+    default: str = ""
+    login_file: str = ""
+    default_login_file: str = ""
+    login_key: str = ""
+    aliases: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class UsageConfig:
+    """How to read a tool's subscription limits.
+
+    A profile with this section is a tool that has plan
+    limits. ``parser`` names the reader for its screen (see
+    ``agent/usage_probe.py``); left empty, the tool has limits
+    but no way to read them, and the UI says "unavailable".
+
+    Attributes:
+        parser: Name of the screen reader: ``claude``,
+            ``codex``, or "" for none.
+        keys: What to type to bring the limits up.
+        command: Command that opens the tool. Defaults to the
+            profile's ``commands.new``.
+        prompts: Start-up questions to answer before typing.
+            Each is ``{match: <text on screen>, keys: [<tmux
+            key names>]}`` and is answered once.
+    """
+
+    parser: str = ""
+    keys: str = ""
+    command: List[str] = field(default_factory=list)
+    prompts: List[dict] = field(default_factory=list)
+
+
+@dataclass
 class MountConfig:
     """Volume mount for container run."""
 
@@ -163,6 +229,16 @@ class AgentProfile:
     spawn_settings: Dict[str, Dict[str, object]] = field(default_factory=dict)
     provisioning: Optional[ProvisioningConfig] = None
     models: Optional[ModelsConfig] = None
+    config_dirs: Optional[ConfigDirsConfig] = None
+    usage: Optional[UsageConfig] = None
+
+    @property
+    def is_variant(self) -> bool:
+        """Whether this profile is a discovered variant: one
+        that runs the tool against a non-default configuration
+        directory.
+        """
+        return bool(self.config_dirs and self.config_dirs.env in self.env)
 
     @property
     def supports_resume(self) -> bool:
@@ -289,7 +365,174 @@ def _parse_profile(data: dict) -> AgentProfile:
             auth_env=models.get("auth_env"),
         )
 
+    # Subscription limits
+    usage = data.get("usage")
+    if usage is not None:
+        usage = usage or {}
+        profile.usage = UsageConfig(
+            parser=usage.get("parser", ""),
+            keys=usage.get("keys", ""),
+            command=usage.get("command") or [],
+            prompts=usage.get("prompts") or [],
+        )
+
+    # Per-account configuration directories
+    dirs = data.get("config_dirs")
+    if dirs:
+        profile.config_dirs = ConfigDirsConfig(
+            env=dirs.get("env", ""),
+            glob=dirs.get("glob", ""),
+            default=dirs.get("default", ""),
+            login_file=dirs.get("login_file", ""),
+            default_login_file=dirs.get("default_login_file", ""),
+            login_key=dirs.get("login_key", ""),
+            aliases=dirs.get("aliases") or {},
+        )
+
     return profile
+
+
+def _has_login(path: str, key: str) -> bool:
+    """Tells whether a login file shows a signed-in account.
+
+    Only the presence of the file, or of one key in it, is
+    looked at. Its contents are never returned or logged.
+
+    Args:
+        path: Path of the login file.
+        key: Top-level JSON key that must be present, or ""
+            when the file existing is enough.
+
+    Returns:
+        True if an account is signed in.
+    """
+    if not os.path.isfile(path):
+        return False
+    if not key:
+        return True
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get(key))
+
+
+def profile_logged_in(profile: AgentProfile) -> bool:
+    """Best-effort check that a tool is ready to use.
+
+    A tool counts as signed in when its required auth
+    variables are set and, for tools with a known login file,
+    that file shows an account. Tools the daemon knows nothing
+    about are assumed ready. A credential passed through the
+    environment (API key, cloud project) also counts, as the
+    login file is only one of the ways to authenticate.
+
+    Args:
+        profile: The profile, or variant, to check.
+
+    Returns:
+        False only when the daemon can tell a login is missing.
+    """
+    try:
+        wanted = profile.auth.env_vars
+        if wanted:
+            check = all if profile.auth.require == "all" else any
+            if not check(os.getenv(v) for v in wanted):
+                return False
+        cfg = profile.config_dirs
+        if not cfg or not cfg.login_file:
+            return True
+        passthrough = (
+            profile.provisioning.passthrough_env if profile.provisioning else []
+        )
+        if any(os.getenv(v) for v in passthrough):
+            return True
+        chosen = profile.env.get(cfg.env) if cfg.env else None
+        if chosen:
+            path = os.path.join(chosen, cfg.login_file)
+        else:
+            path = os.path.expanduser(
+                cfg.default_login_file or os.path.join(cfg.default, cfg.login_file)
+            )
+        return _has_login(path, cfg.login_key)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        # A check that cannot run must not hide the tool.
+        print(f"Login check failed for {profile.name}: {e}")
+        return True
+
+
+def discover_variants(profile: AgentProfile) -> List[AgentProfile]:
+    """Finds the extra accounts a tool is set up with.
+
+    Every directory matching the profile's ``config_dirs.glob``
+    that has a signed-in account, other than the default one,
+    becomes a variant: a copy of the profile that runs the tool
+    with ``config_dirs.env`` pointing at that directory. The
+    variant is named after the directory, e.g.
+    ``~/.claude-work`` gives ``claude-work``.
+
+    Args:
+        profile: A base profile. Variants yield nothing.
+
+    Returns:
+        The variants, ordered by directory name. Empty when the
+        profile has no ``config_dirs`` or nothing matches.
+    """
+    cfg = profile.config_dirs
+    if not cfg or not cfg.env or not cfg.glob or profile.is_variant:
+        return []
+    variants = []
+    try:
+        default = os.path.realpath(os.path.expanduser(cfg.default))
+        default_login = cfg.default_login_file or os.path.join(
+            cfg.default, cfg.login_file
+        )
+        for path in sorted(glob.glob(os.path.expanduser(cfg.glob))):
+            if not os.path.isdir(path) or os.path.realpath(path) == default:
+                continue
+            login = os.path.join(path, cfg.login_file)
+            if cfg.login_file and not _has_login(login, cfg.login_key):
+                continue
+            # "~/.claude-work" -> "work"; an unrelated name
+            # is kept whole.
+            base = os.path.basename(path).lstrip(".")
+            suffix = (
+                base[len(profile.name) :] if base.startswith(profile.name) else base
+            )
+            suffix = suffix.strip("-_. ") or base
+
+            def moved(ref: str, _path=path, _login=login) -> str:
+                """Points a path of the default account at
+                this variant's directory."""
+                if ref == default_login:
+                    return _login
+                if cfg.default and ref.startswith(cfg.default + "/"):
+                    return _path + ref[len(cfg.default) :]
+                return ref
+
+            variants.append(
+                replace(
+                    profile,
+                    name=f"{profile.name}-{suffix}",
+                    display_name=f"{profile.display_name} ({suffix})",
+                    env={**profile.env, cfg.env: path},
+                    mcp=(
+                        replace(
+                            profile.mcp,
+                            user_files=[moved(f) for f in profile.mcp.user_files],
+                        )
+                        if profile.mcp
+                        else None
+                    ),
+                    spawn_settings={
+                        moved(k): v for k, v in profile.spawn_settings.items()
+                    },
+                )
+            )
+    except OSError as e:
+        print(f"Could not look for {profile.name} accounts: {e}")
+    return variants
 
 
 # Keys whose values are dicts that should be merged

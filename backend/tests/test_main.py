@@ -148,6 +148,46 @@ def test_update_task_description():
     assert r_missing.status_code == 404
 
 
+def test_update_session_name():
+    """Renaming a session sets, trims and clears its name."""
+    r_host = client.post(
+        "/hosts",
+        json={"name": "rename-host", "host_token": "rename-token"},
+    )
+    host_id = r_host.json()["id"]
+    from backend.app import models
+
+    db = next(override_get_db())
+    host = db.query(models.Host).filter(models.Host.id == host_id).first()
+    host.status = "online"
+    db.commit()
+    db.close()
+
+    r_spawn = client.post(
+        "/agents/spawn",
+        json={"host_id": host_id, "tool_name": "bash", "session_name": "old"},
+    )
+    agent_id = r_spawn.json()["agent_id"]
+
+    def name():
+        r = client.get(f"/agents/{agent_id}/details")
+        return r.json()["telemetry"]["session_name"]
+
+    url = f"/agents/{agent_id}/session-name"
+    assert client.patch(url, json={"session_name": "  api work "}).status_code == 200
+    assert name() == "api work"
+
+    # Blank clears the name.
+    assert client.patch(url, json={"session_name": "  "}).status_code == 200
+    assert name() is None
+
+    assert client.patch(url, json={"session_name": "x" * 61}).status_code == 422
+    r_missing = client.patch(
+        "/agents/nonexistent/session-name", json={"session_name": "nope"}
+    )
+    assert r_missing.status_code == 404
+
+
 def test_spawn_agent_host_offline():
     """Spawning on an offline host returns 400."""
     r_host = client.post(
@@ -194,6 +234,7 @@ def test_spawn_agent_with_task():
             "tool_name": "claude",
             "project_dir": "/git/myproject",
             "task_description": "Fix the bug",
+            "session_name": "  login fix ",
         },
     )
     assert r.status_code == 200
@@ -203,6 +244,7 @@ def test_spawn_agent_with_task():
     tel = r_detail.json()["telemetry"]
     assert tel["project_dir"] == "/git/myproject"
     assert tel["task_description"] == "Fix the bug"
+    assert tel["session_name"] == "login fix"
 
 
 def test_stop_agent():
@@ -420,6 +462,58 @@ def _online_host(name):
     return host_id
 
 
+def test_upload_file_relays_to_daemon(monkeypatch):
+    """A dropped file reaches the session's daemon; failures map to HTTP."""
+    from backend.app import main, models, socket
+
+    host_id = _online_host("upload-host")
+    db = TestingSessionLocal()
+    db.add(models.Agent(agent_id="up-1", host_id=host_id, status="active"))
+    db.commit()
+    db.close()
+    files = {"file": ("shot.png", b"png-bytes")}
+
+    r = client.post("/agents/missing/files", files=files)
+    assert r.status_code == 404
+    r = client.post("/agents/up-1/files", files=files)
+    assert r.status_code == 400  # no daemon connected
+
+    monkeypatch.setitem(socket.host_sids, host_id, "sid-1")
+    answers = iter(
+        [
+            {"ok": True, "path": "/tmp/agent-dashboard-uploads/up-1/shot.png"},
+            {"ok": False, "error": "Invalid file name."},
+        ]
+    )
+    sent = []
+
+    async def fake_call(event, data, **kwargs):
+        sent.append((event, data, kwargs.get("to")))
+        return next(answers)
+
+    monkeypatch.setattr(socket.sio, "call", fake_call)
+
+    r = client.post("/agents/up-1/files", files=files)
+    assert r.status_code == 200
+    assert r.json() == {"path": "/tmp/agent-dashboard-uploads/up-1/shot.png"}
+    assert sent == [
+        (
+            "upload_file",
+            {"agent_id": "up-1", "name": "shot.png", "data": b"png-bytes"},
+            "sid-1",
+        )
+    ]
+
+    r = client.post("/agents/up-1/files", files=files)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Invalid file name."
+
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 4)
+    r = client.post("/agents/up-1/files", files=files)
+    assert r.status_code == 413
+    assert len(sent) == 2
+
+
 def test_create_project_host_offline():
     """Creating a folder on a host with no daemon connected returns 400."""
     host_id = _online_host("folder-no-daemon")
@@ -457,6 +551,26 @@ def test_create_project_relays_daemon_answer(monkeypatch):
     assert r.json()["detail"] == "A folder with that name already exists."
 
 
+def test_restart_host_daemon(monkeypatch):
+    """Restart reaches only the host's daemon; offline hosts get a 400."""
+    from backend.app import socket
+
+    host_id = _online_host("restart-host")
+    r = client.post(f"/hosts/{host_id}/restart")
+    assert r.status_code == 400
+
+    monkeypatch.setitem(socket.host_sids, host_id, "sid-3")
+    sent = []
+
+    async def fake_emit(event, data, **kwargs):
+        sent.append((event, kwargs.get("to")))
+
+    monkeypatch.setattr(socket.sio, "emit", fake_emit)
+    r = client.post(f"/hosts/{host_id}/restart")
+    assert r.status_code == 200
+    assert sent == [("restart_daemon", "sid-3")]
+
+
 def test_list_tool_models_relays_daemon_answer(monkeypatch):
     """The daemon's live model list is returned; a refusal becomes a 400."""
     from backend.app import socket
@@ -465,7 +579,11 @@ def test_list_tool_models_relays_daemon_answer(monkeypatch):
     monkeypatch.setitem(socket.host_sids, host_id, "sid-2")
     answers = iter(
         [
-            {"ok": True, "models": ["auto", "x"], "default_model": "auto"},
+            {
+                "ok": True,
+                "models": ["auto", "x"],
+                "default_model": "auto",
+            },
             {"ok": False, "error": "This tool has no model list."},
         ]
     )
@@ -477,11 +595,152 @@ def test_list_tool_models_relays_daemon_answer(monkeypatch):
 
     monkeypatch.setattr(socket.sio, "call", fake_call)
 
-    r = client.get(f"/hosts/{host_id}/tools/omniroute/models")
+    r = client.get(f"/hosts/{host_id}/tools/router/models")
     assert r.status_code == 200
-    assert r.json() == {"models": ["auto", "x"], "default_model": "auto", "error": None}
-    assert sent == [("list_models", {"tool": "omniroute"}, "sid-2")]
+    assert r.json() == {
+        "models": ["auto", "x"],
+        "default_model": "auto",
+        "error": None,
+    }
+    assert sent == [("list_models", {"tool": "router"}, "sid-2")]
 
     r = client.get(f"/hosts/{host_id}/tools/bash/models")
     assert r.status_code == 400
     assert r.json()["detail"] == "This tool has no model list."
+
+
+def test_open_tabs_are_saved_per_user():
+    """Open tabs round-trip in order and stay private to a user."""
+    assert client.get("/me/tabs").json() == {"tabs": None}
+
+    saved = client.put("/me/tabs", json={"tabs": ["b", "a", "b", "c"]})
+    assert saved.status_code == 200
+    # Order is kept; a repeated ID is dropped.
+    assert saved.json() == {"tabs": ["b", "a", "c"]}
+    assert client.get("/me/tabs").json() == {"tabs": ["b", "a", "c"]}
+
+    # Closing every tab is remembered as an empty list.
+    client.put("/me/tabs", json={"tabs": []})
+    assert client.get("/me/tabs").json() == {"tabs": []}
+    client.put("/me/tabs", json={"tabs": ["a"]})
+
+    assert client.put("/me/tabs", json={"tabs": ["x" * 201]}).status_code == 422
+
+    fastapi_app.dependency_overrides[get_current_user] = lambda: {
+        "email": "other@example.com"
+    }
+    try:
+        assert client.get("/me/tabs").json() == {"tabs": None}
+        client.put("/me/tabs", json={"tabs": ["z"]})
+    finally:
+        fastapi_app.dependency_overrides[get_current_user] = override_get_current_user
+    assert client.get("/me/tabs").json() == {"tabs": ["a"]}
+
+
+def test_tool_settings_disable_rename_and_cascade():
+    """A tool can be renamed and disabled per host; a disabled
+    tool cannot be spawned; deleting the host drops the rows."""
+    from backend.app import models
+
+    host = client.post(
+        "/hosts", json={"name": "settings-host", "host_token": "settings-token"}
+    ).json()
+    hid = host["id"]
+    assert host["tool_settings"] == []
+    db = TestingSessionLocal()
+    db.query(models.Host).filter(models.Host.id == hid).update({"status": "online"})
+    db.commit()
+    db.close()
+
+    url = f"/hosts/{hid}/tools/claude-work/settings"
+    assert client.put(url, json={"label": "  Trabalho "}).json() == [
+        {"tool": "claude-work", "enabled": True, "label": "Trabalho"}
+    ]
+    # Fields left out keep their value; blank restores the default.
+    assert client.put(url, json={"enabled": False}).json() == [
+        {"tool": "claude-work", "enabled": False, "label": "Trabalho"}
+    ]
+    assert client.put(url, json={"label": ""}).json()[0]["label"] is None
+    assert client.put(url, json={"label": "x" * 41}).status_code == 422
+    assert client.put("/hosts/99999/tools/claude/settings", json={}).status_code == 404
+
+    listed = [h for h in client.get("/hosts").json() if h["id"] == hid][0]
+    assert listed["tool_settings"] == [
+        {"tool": "claude-work", "enabled": False, "label": None}
+    ]
+
+    refused = client.post(
+        "/agents/spawn", json={"host_id": hid, "tool_name": "claude-work"}
+    )
+    assert refused.status_code == 403
+    assert "disabled" in refused.json()["detail"]
+    # Another tool on the same host, and the same tool once
+    # enabled again, still start.
+    assert (
+        client.post(
+            "/agents/spawn", json={"host_id": hid, "tool_name": "bash"}
+        ).status_code
+        == 200
+    )
+    client.put(url, json={"enabled": True})
+    assert (
+        client.post(
+            "/agents/spawn", json={"host_id": hid, "tool_name": "claude-work"}
+        ).status_code
+        == 200
+    )
+
+    assert client.delete(f"/hosts/{hid}").status_code == 200
+    db = TestingSessionLocal()
+    try:
+        assert (
+            db.query(models.HostToolSetting)
+            .filter(models.HostToolSetting.host_id == hid)
+            .count()
+            == 0
+        )
+    finally:
+        db.close()
+
+
+def test_allowed_emails_limits_oidc_users(monkeypatch):
+    """ALLOWED_EMAILS admits only the listed accounts, any case."""
+    from backend.app import auth
+
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    assert auth.is_allowed({"email": "anyone@gmail.com"})
+    assert not auth.is_allowed(None)
+
+    monkeypatch.setenv("ALLOWED_EMAILS", "me@example.com, Friend@Example.com")
+    assert auth.is_allowed({"email": "ME@example.com"})
+    assert auth.is_allowed({"email": "friend@example.com"})
+    assert not auth.is_allowed({"email": "stranger@gmail.com"})
+    assert not auth.is_allowed({})
+
+
+def test_socket_ui_client_needs_allowed_email(monkeypatch):
+    """A UI socket connects only with a session of an allowed user."""
+    import asyncio
+    import base64
+    import json
+
+    from itsdangerous import TimestampSigner
+
+    from backend.app import socket
+
+    monkeypatch.delenv("BYPASS_AUTH", raising=False)
+    monkeypatch.setenv("SECRET_KEY", "test-key")
+    monkeypatch.setenv("ALLOWED_EMAILS", "me@example.com")
+
+    def environ_for(email):
+        data = base64.b64encode(json.dumps({"user": {"email": email}}).encode())
+        cookie = TimestampSigner("test-key").sign(data).decode()
+        headers = [(b"cookie", f"session={cookie}".encode())]
+        return {"asgi.scope": {"headers": headers}}
+
+    async def connect(environ):
+        return await socket.connect("sid-ui", environ, None)
+
+    assert asyncio.run(connect(environ_for("me@example.com"))) is True
+    assert asyncio.run(connect(environ_for("stranger@gmail.com"))) is False
+    assert asyncio.run(connect({"asgi.scope": {"headers": []}})) is False

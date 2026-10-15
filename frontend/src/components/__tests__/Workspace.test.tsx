@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import type { Agent } from '../../api';
 
 // The workspace is tested around its two heavy children: the
@@ -46,6 +52,18 @@ vi.mock('../Terminal', async () => {
     },
   };
 });
+const renamed: [string, string][] = [];
+// What the server holds as the user's open tabs.
+const server: { tabs: string[] | null } = { tabs: null };
+vi.mock('../../api', () => ({
+  getOpenTabs: async () => server.tabs,
+  saveOpenTabs: async (ids: string[]) => {
+    server.tabs = ids;
+  },
+  renameSession: async (id: string, name: string) => {
+    renamed.push([id, name]);
+  },
+}));
 vi.mock('../terminalWindow', () => ({
   openTerminalWindow: (id: string) => opened.push(id),
 }));
@@ -86,6 +104,7 @@ beforeEach(() => {
   terminalMounts.length = 0;
   terminalUnmounts.length = 0;
   opened.length = 0;
+  server.tabs = null;
   document.title = '';
   vi.spyOn(document, 'hasFocus').mockReturnValue(true);
 });
@@ -128,6 +147,55 @@ describe('Workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close tab bash · b' }));
     expect(tab(/bash · a/)).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByRole('tab', { name: /bash · b/ })).toBeNull();
+  });
+
+  it('splits the view in two panes and sends tab clicks to the focused one', () => {
+    const first = render(<Workspace />);
+    const shown = () =>
+      screen
+        .getAllByText(/terminal:/)
+        .map((el) => /terminal:./.exec(el.textContent ?? '')?.[0]);
+    const sideBySide = () =>
+      screen.queryByRole('button', { name: 'Split side by side' });
+    report([agent('a'), agent('b'), agent('c')]);
+    attach('a');
+    // One tab is not enough to split.
+    expect(sideBySide()).toBeDisabled();
+    attach('b');
+    attach('c');
+
+    // The second pane starts on the next tab, wrapping around.
+    fireEvent.click(sideBySide()!);
+    expect(shown()).toEqual(['terminal:c', 'terminal:a']);
+
+    // A tab click replaces the focused pane; clicking inside
+    // the other pane moves the focus there.
+    fireEvent.mouseDown(screen.getByText(/terminal:a/));
+    expect(tab(/bash · a/)).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(tab(/bash · b/));
+    expect(shown()).toEqual(['terminal:c', 'terminal:b']);
+    // A session already in a pane is focused, not duplicated.
+    fireEvent.click(tab(/bash · c/));
+    expect(shown()).toEqual(['terminal:c', 'terminal:b']);
+
+    // The other direction keeps both panes, and the split
+    // survives the dashboard tab and a reload.
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Split top and bottom' }),
+    );
+    fireEvent.click(tab(/Dashboard/));
+    expect(screen.queryByText(/terminal:/)).not.toBeInTheDocument();
+    fireEvent.click(tab(/bash · c/));
+    first.unmount();
+    render(<Workspace />);
+    report([agent('a'), agent('b'), agent('c')]);
+    expect(shown()).toEqual(['terminal:c', 'terminal:b']);
+
+    // Closing a pane's tab leaves the other session alone.
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab bash · c' }));
+    expect(shown()).toEqual(['terminal:b']);
+    expect(tab(/bash · b/)).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('button', { name: 'Close split' })).toBeNull();
   });
 
   it('restores open tabs after a reload and drops ended sessions', () => {
@@ -182,10 +250,10 @@ describe('Workspace', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('counts sessions without a tab on the Dashboard tab', () => {
+  it('counts sessions without a tab in the title, not on the Dashboard tab', () => {
     render(<Workspace />);
     report([agent('a', 'waiting_permission')]);
-    expect(screen.getByLabelText('1 sessions need attention')).toBeVisible();
+    expect(screen.queryByLabelText(/need attention/)).toBeNull();
     expect(document.title).toBe('(1) Agent Dashboard');
   });
 
@@ -293,5 +361,127 @@ describe('Workspace', () => {
     expect(shown).toEqual([
       { title: 'bash · a', body: 'Finished working', tag: 'a' },
     ]);
+  });
+
+  it('renames a session from the settings menu and the tab menu', async () => {
+    renamed.length = 0;
+    render(<Workspace />);
+    report([agent('a'), agent('b')]);
+    attach('b');
+    attach('a');
+
+    // Settings menu renames the active tab.
+    // Closed popovers are hidden from the accessibility tree.
+    const fromSettings = screen.getByRole('button', {
+      name: 'Rename session',
+      hidden: true,
+    });
+    const fromMenu = screen.getByRole('menuitem', {
+      name: 'Rename session',
+      hidden: true,
+    });
+    fireEvent.click(fromSettings);
+    const input = screen.getByRole('textbox', { name: 'Session name' });
+    // Focused inside the click itself, not a frame later: a
+    // phone only shows its keyboard for a focus made in the tap.
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: '  api work ' } });
+    await act(async () => fireEvent.keyDown(input, { key: 'Enter' }));
+    expect(renamed).toEqual([['a', 'api work']]);
+    report([
+      { ...agent('a'), telemetry: { session_name: 'api work' } },
+      agent('b'),
+    ]);
+    expect(tab('api work')).toBeInTheDocument();
+
+    // Right-click renames the tab clicked on, not the active one.
+    fireEvent.contextMenu(tab(/bash · b/));
+    fireEvent.click(fromMenu);
+    const other = screen.getByRole('textbox', { name: 'Session name' });
+    expect(other).toHaveValue('bash · b');
+    // Escape cancels without saving.
+    fireEvent.keyDown(other, { key: 'Escape' });
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(renamed).toHaveLength(1);
+  });
+
+  it('reorders tabs by drag and drop, keeping the order', () => {
+    render(<Workspace />);
+    report([agent('a'), agent('b'), agent('c')]);
+    attach('a');
+    attach('b');
+    attach('c');
+    const order = () =>
+      screen
+        .getAllByRole('tab')
+        .map((t) => t.textContent)
+        .join('|');
+    expect(order()).toBe('Dashboard|bash · a|bash · b|bash · c');
+
+    // The fixed Dashboard tab cannot be dragged.
+    expect(tab(/Dashboard/)).not.toHaveAttribute('draggable', 'true');
+
+    const drag = (from: RegExp, to: RegExp, clientX: number) => {
+      const source = tab(from).parentElement!;
+      const target = tab(to).parentElement!;
+      const dataTransfer = { setData: vi.fn() };
+      fireEvent.dragStart(source, { dataTransfer });
+      // jsdom boxes are all zero: any x > 0 is the right half.
+      // jsdom has no DragEvent, so the pointer position has to
+      // be put on the event by hand.
+      const over = createEvent.dragOver(target, { dataTransfer });
+      Object.defineProperty(over, 'clientX', { value: clientX });
+      fireEvent(target, over);
+      fireEvent.drop(target, { dataTransfer });
+      fireEvent.dragEnd(source, { dataTransfer });
+    };
+    drag(/bash · c/, /bash · a/, 0);
+    expect(order()).toBe('Dashboard|bash · c|bash · a|bash · b');
+    drag(/bash · c/, /bash · b/, 5);
+    expect(order()).toBe('Dashboard|bash · a|bash · b|bash · c');
+    drag(/bash · a/, /bash · b/, 5);
+    expect(order()).toBe('Dashboard|bash · b|bash · a|bash · c');
+
+    // The order is what a reload reads back.
+    const saved = JSON.parse(localStorage.getItem('agentDashboard.tabs')!);
+    expect(saved.tabs.map((t: { id: string }) => t.id)).toEqual([
+      'b',
+      'a',
+      'c',
+    ]);
+  });
+
+  it('follows the open tabs the server holds for the user', async () => {
+    // Another device left b and a open, in that order; this
+    // browser only remembers a tab for c.
+    server.tabs = ['b', 'a'];
+    localStorage.setItem(
+      'agentDashboard.tabs',
+      JSON.stringify({ tabs: [{ id: 'c', label: 'old' }], active: 'c' }),
+    );
+    render(<Workspace />);
+    await act(async () => {});
+    report([agent('a'), agent('b'), agent('c')]);
+    const order = () =>
+      screen
+        .getAllByRole('tab')
+        .map((t) => t.textContent)
+        .join('|');
+    expect(order()).toBe('Dashboard|bash · b|bash · a');
+
+    // Opening a tab here is saved for the other devices.
+    attach('c');
+    await act(async () => {});
+    expect(server.tabs).toEqual(['b', 'a', 'c']);
+  });
+
+  it("gives the server this browser's tabs when it has none", async () => {
+    localStorage.setItem(
+      'agentDashboard.tabs',
+      JSON.stringify({ tabs: [{ id: 'a', label: 'x' }], active: 'a' }),
+    );
+    render(<Workspace />);
+    await act(async () => {});
+    expect(server.tabs).toEqual(['a']);
   });
 });

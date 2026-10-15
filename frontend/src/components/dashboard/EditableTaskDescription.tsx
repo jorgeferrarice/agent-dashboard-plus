@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { Info } from 'lucide-react';
 import { updateTaskDescription } from '../../api';
 
@@ -20,9 +21,16 @@ const EditableTaskDescription: React.FC<{
     if (!editing) setValue(description);
   }, [description, editing]);
 
-  useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
+  /**
+   * Swaps the text for the input and focuses it inside the tap
+   * itself. Phones only raise the on-screen keyboard for a
+   * focus() made while the tap is being handled; an effect
+   * runs after the handler returns, which is too late there.
+   */
+  const startEditing = () => {
+    flushSync(() => setEditing(true));
+    inputRef.current?.focus();
+  };
 
   const save = async () => {
     setEditing(false);
@@ -54,6 +62,7 @@ const EditableTaskDescription: React.FC<{
           if (e.key === 'Escape') cancel();
         }}
         onBlur={save}
+        enterKeyHint="done"
         className="w-full bg-slate-800 text-[11px] text-slate-200 px-1.5 py-0.5 rounded border border-accent-muted outline-none focus:border-accent"
         placeholder="Describe the task..."
       />
@@ -63,11 +72,11 @@ const EditableTaskDescription: React.FC<{
   return (
     <p
       className="text-[11px] text-slate-300 line-clamp-2 leading-relaxed cursor-pointer hover:text-slate-100 transition-colors"
-      onClick={() => setEditing(true)}
+      onClick={startEditing}
       title="Click to edit task description"
     >
       <Info size={10} className="inline mr-1 text-slate-500" />
-      {description || 'Click to add description...'}
+      {description || 'Add a description...'}
     </p>
   );
 };

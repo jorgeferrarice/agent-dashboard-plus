@@ -1,25 +1,165 @@
 <p align="center">
-  <img src="docs/images/agent-dashboard-logo.svg" alt="Agent Dashboard" width="128" height="128">
+  <img src="docs/images/agent-dashboard-logo.svg" alt="Agent Dashboard Plus" width="128" height="128">
 </p>
 
-<h1 align="center">Agent Dashboard</h1>
+<h1 align="center">Agent Dashboard Plus</h1>
 
 <p align="center">
-A multi-host orchestration platform for AI coding agents — spawn, monitor, and interact with Claude Code, Pi, Antigravity, OpenCode, Codex, and Bash sessions across multiple machines from a single web dashboard.
+A multi-host orchestration platform for AI coding agents — spawn, monitor, and interact with Claude Code, Codex, Grok, and Bash sessions across multiple machines from a single web dashboard, on desktop or phone.
 </p>
 
 <p align="center">
-  <a href="https://github.com/dustinblack/agent-dashboard/actions/workflows/ci.yml"><img src="https://github.com/dustinblack/agent-dashboard/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/dustinblack/agent-dashboard/releases/latest"><img src="https://img.shields.io/github/v/release/dustinblack/agent-dashboard" alt="Release"></a>
-  <a href="https://github.com/dustinblack/agent-dashboard/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dustinblack/agent-dashboard" alt="License"></a>
+  <a href="https://github.com/jorgeferrarice/agent-dashboard-plus/blob/main/LICENSE"><img src="https://img.shields.io/github/license/jorgeferrarice/agent-dashboard-plus" alt="License"></a>
   <img src="https://img.shields.io/badge/python-3.9+-3776ab" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/node-22+-5fa04e" alt="Node.js 22+">
   <img src="https://img.shields.io/badge/typescript-5+-3178c6" alt="TypeScript 5+">
 </p>
 
+> [!NOTE]
+> **Agent Dashboard Plus is a modified derivative of
+> [dustinblack/agent-dashboard](https://github.com/dustinblack/agent-dashboard)**
+> by Dustin Black, licensed under Apache-2.0. All credit for the
+> original design and code goes to its author. This repository
+> contains modifications to the original files; see
+> [What's new in this fork](#whats-new-in-this-fork). It is
+> maintained for personal use and is not affiliated with the
+> upstream project.
+
 <p align="center">
   <img src="docs/images/agent-dashboard_main_page_in_use.png" alt="Agent Dashboard main page showing active agent sessions and registered hosts" width="800">
 </p>
+
+## What's new in this fork
+
+**Setup**
+- **One-command install** — [`./setup.sh`](#quick-start) sets up
+  the hub, registers the machine as a host and installs the daemon
+  as a service on macOS and Linux (apt/dnf).
+
+**Sessions**
+- **Tabs instead of popups** — Sessions open as tabs next to the
+  Dashboard, sharing one Socket.IO connection per page. Only the
+  active tab streams output.
+- **Attention marks** — Tabs are marked when a session waits for a
+  permission answer, finished working while unwatched, or ended;
+  optional browser notifications.
+- **Rename sessions** — From the tab's context menu or the settings
+  cog; the name is shared across browsers.
+- **Start in any folder** — Plain folders (not only git
+  repositories) under the projects root can be picked, and new
+  folders can be created from the spawn dialog, optionally with
+  `git init`.
+- **Searchable model list** — Profiles that declare a `models`
+  section get a live, type-to-search model list in the spawn
+  dialog, fetched from the host each time it opens.
+- **Send files** — Drag files onto a terminal; they are saved on the
+  host and their paths pasted at the prompt.
+- **Resume on request** — An ended session is never respawned on its
+  own; its tab offers **Resume**.
+
+**Agent detection**
+- **Several accounts per tool** — Every signed-in config directory
+  (`~/.claude*`, `~/.codex*`, `~/.grok*`) is offered as its own tool,
+  e.g. `~/.claude-work` becomes "claude-work".
+- **Grok profile** — xAI's Grok CLI is supported out of the box.
+- **Signed-out warning** — A tool installed but not signed in keeps
+  its button with a warning mark.
+- **Plan limits** — Each host card shows how much of the five-hour
+  and weekly allowance each account has used.
+- **Host settings** — Hide or rename each tool's button per host.
+
+**Mobile**
+- **Phone layout** — Compact header, larger touch targets, smaller
+  terminal font on narrow screens.
+- **Input bar** — Keys a phone keyboard lacks (Esc, Tab, arrows,
+  Ctrl+C/D/R) and a text field with autocorrect and dictation.
+- **Touch scroll and text selection** — Swipe scrolls the session's
+  scrollback; a button shows the screen as selectable plain text.
+- **Installable app** — Web app manifest and service worker, so the
+  dashboard can be added to the home screen; tapping a notification
+  opens the session.
+
+**Reliability**
+- **Restart button** — Each host card has **Restart**, which
+  restarts that host's daemon after a confirmation dialog. It ends
+  **every session on that host**. See
+  [Restarting the Daemon](docs/host-daemon.md#restarting-the-daemon-from-the-dashboard).
+- **Daemon fixes** — A background task can no longer die silently
+  (which left every terminal blank); it logs and restarts. Stopping
+  the daemon now cancels every task, so a restart no longer leaves
+  the old process holding the OTLP port.
+
+**Removed**
+- The Pi, Antigravity (agy), OpenCode and OmniRoute profiles are not
+  shipped. Included profiles: `bash`, `claude`, `codex`, `grok`
+  (plus `agent/profiles/archive/gemini.yaml`). Add others from
+  [`TEMPLATE.yaml.example`](agent/profiles/TEMPLATE.yaml.example).
+- GitHub Actions CI and Dependabot. Run `./scripts/check.sh ci`
+  locally instead.
+
+## Quick start
+
+```bash
+git clone https://github.com/jorgeferrarice/agent-dashboard-plus.git
+cd agent-dashboard-plus
+./setup.sh            # interactive
+./setup.sh --dry-run  # print every step without running it
+./setup.sh --help
+```
+
+Supported: macOS, and Linux with `apt` or `dnf`. The script is
+safe to re-run and keeps an existing `.env`. It asks before
+installing anything. It:
+
+1. **Finds a container runtime** — `docker` (OrbStack or Docker
+   Desktop) and/or `podman`. If both are present it asks which to
+   use. If none is, it offers to install one: OrbStack via Homebrew
+   on macOS, Docker or Podman via apt/dnf on Linux.
+2. **Installs missing tools** — `tmux`, `uv`, `git`, `node`/`npm`.
+3. **Writes `.env`** — generated `SECRET_KEY` and `HOST_TOKEN`,
+   the chosen `CONTAINER_RUNTIME`, `VITE_API_URL`, and a login mode:
+   - **Google OAuth** — asks for `OIDC_CLIENT_ID`,
+     `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` and `ALLOWED_EMAILS`
+     (required). Register `<VITE_API_URL>/auth` as the redirect URI
+     of your OAuth client.
+   - **No login** — `BYPASS_AUTH=true`. Only for a dashboard reached
+     from `localhost`; the script warns about it.
+4. **Starts the hub** — builds and starts the backend and frontend
+   containers with compose. The dashboard is at
+   <http://localhost:8080> (`VITE_API_URL=http://localhost:8080`).
+5. **Registers this machine as a host** automatically.
+6. **Installs the host daemon as a service** that restarts on any
+   exit, which the Restart button relies on:
+   - macOS: LaunchAgent `com.agent-dashboard.daemon` (`KeepAlive`).
+     Logs: `~/Library/Logs/agent-dashboard-daemon.log`.
+   - Linux: systemd user unit `agent-dashboard-daemon.service`
+     (`Restart=always`). Logs:
+     `journalctl --user -u agent-dashboard-daemon`.
+7. **Optional: Cloudflare Tunnel** for access from anywhere. Create
+   a tunnel in the Cloudflare dashboard (Zero Trust > Networks >
+   Tunnels), add a public hostname pointing to
+   `http://localhost:8080`, then paste the tunnel token and the
+   domain. The script installs `cloudflared` as a service and
+   rebuilds the frontend for `https://<domain>`. It refuses to
+   expose the dashboard when login is off.
+8. **Optional: agent CLIs** — offers to install
+   - Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`
+   - Codex: `npm install -g @openai/codex`
+   - Grok: `curl -fsSL https://x.ai/cli/install.sh | bash`
+
+   Sign in to each CLI you use; the daemon then offers it.
+
+### Security
+
+- **Every session is a shell on the host.** Whoever can log in can
+  run anything as your user.
+- **`ALLOWED_EMAILS`** (comma-separated) restricts who can log in
+  with OIDC. Without it, any Google account that completes the
+  OAuth flow gets in.
+- **Never expose the dashboard with `BYPASS_AUTH=true`** — not
+  through a tunnel, a public IP or a shared network.
+- **`.env` holds secrets** and is git-ignored. `.env.example`
+  lists the keys with placeholders.
 
 ## Overview
 
@@ -27,45 +167,43 @@ Agent Dashboard is a **multi-host orchestration platform** for
 AI coding agents. It remotely spawns, monitors, and provides
 interactive terminal access to AI coding agent sessions
 running across multiple development machines — all from a
-single web interface. Supports Claude Code, Pi, Antigravity
-(agy), OpenCode, Codex, and Bash out of the box, with new
-agents added via YAML profiles.
+single web interface. Supports Claude Code, Codex, Grok and
+Bash out of the box, with new agents added via YAML profiles.
 
 > [!TIP]
-> **How it works:** Install the hub (backend + frontend) on any
-> server with `podman-compose up`. Deploy a daemon container on
-> each development machine. Open the web dashboard to spawn,
-> monitor, and interact with AI agent sessions remotely — full
-> terminal access, live telemetry, and cost tracking from your
-> browser.
+> **How it works:** The hub (backend + frontend) runs in
+> containers. A host daemon runs on each development machine,
+> natively as a service (what `./setup.sh` installs) or in a
+> container. Open the web dashboard to spawn, monitor, and
+> interact with AI agent sessions remotely — full terminal
+> access, live telemetry, and cost tracking from your browser.
 
 The platform consists of three layers: a **React frontend**
 served by Nginx, a **FastAPI + Socket.IO backend hub** that
-coordinates sessions, and **containerized host daemons** deployed
-on each development machine. The daemons spawn agent processes
-inside tmux sessions for terminal stability, relay I/O over
-Socket.IO, and collect OpenTelemetry telemetry including token
-usage, model info, and session cost.
+coordinates sessions, and **host daemons** on each development
+machine. The daemons spawn agent processes inside tmux sessions
+for terminal stability, relay I/O over Socket.IO, and collect
+OpenTelemetry telemetry including token usage, model info, and
+session cost.
 
 > **Browser support:** Modern browsers (Chrome, Firefox, Edge,
-> Safari 15+). Touch scrolling supported on tablets. The layout
-> is responsive and renders well on mobile devices, though it is
-> primarily designed for desktop use.
+> Safari 15+). The layout works on phones and tablets, with a
+> touch input bar and touch scrolling.
 
 ## Features
 
 ### Core Architecture
-- **Multi-host orchestration** — Deploy containerized daemons on
-  any number of development machines. Spawn and manage Claude,
-  Pi, Antigravity, and Bash sessions across all hosts
-  from a single dashboard.
+- **Multi-host orchestration** — Run daemons on any number of
+  development machines. Spawn and manage Claude, Codex, Grok and
+  Bash sessions across all hosts from a single dashboard.
 - **Extensible agent profiles** — Agent tools are defined by
   YAML/JSON [profile configs](docs/agent-profiles.md) rather
   than hardcoded logic. Each profile declares runtime behavior
-  (commands, telemetry, permissions) and build-time provisioning
-  (packages, config seeding, mounts, env vars). Add a new agent
-  by copying the [profile template](agent/profiles/TEMPLATE.yaml.example),
-  then regenerating the Containerfile — no source code changes.
+  (commands, telemetry, permissions, accounts, models) and
+  build-time provisioning (packages, config seeding, mounts, env
+  vars). Add a new agent by copying the
+  [profile template](agent/profiles/TEMPLATE.yaml.example) — no
+  source code changes.
 - **Remote PTY terminals** — Full `xterm-256color` terminal
   emulation via pseudo-terminals, not a log viewer or chat
   interface. Supports cursor movement, line-erase sequences,
@@ -78,21 +216,19 @@ usage, model info, and session cost.
   metrics; estimated cost for other agents from built-in pricing
   tables. Displayed per-session on each agent card.
 - **TUI frontend (experimental)** — Terminal-based dashboard
-  alternative to the web UI, built with Python Textual. Manage
-  agents from any terminal via `podman exec` or SSH. Uses tmux for
-  multi-pane agent terminal access. See
+  alternative to the web UI, built with Python Textual. See
   [TUI documentation](docs/tui.md).
 
 ### Agent Management
 - **Project selection** — Daemons scan `PROJECTS_ROOT` for git
-  repositories (configurable depth); select a project directory
-  from the dropdown when spawning an agent.
+  repositories and, up to `PROJECTS_FOLDER_DEPTH` levels, plain
+  folders; pick one in the spawn dialog or create a new folder
+  under `NEW_PROJECTS_DIR`.
 - **Session resume** — The spawn modal includes a session mode
   toggle (Resume / New) for supported agents. Resume
   continues the most recent conversation in the selected project
   directory or worktree, preserving context across daemon
-  restarts. New
-  starts a fresh session. Resume is the default.
+  restarts. New starts a fresh session. Resume is the default.
 - **[Git worktree](https://git-scm.com/docs/git-worktree)
   isolation** — Optionally spawn agents in isolated git worktrees
   so multiple agents can work on the same repository without
@@ -101,8 +237,8 @@ usage, model info, and session cost.
 - **Companion sessions** — Open a Bash shell alongside any
   agent session in the same project directory. Companions
   inherit the parent's working context (worktree or original).
-- **Host management** — Register, monitor, and delete hosts with
-  cascading cleanup of associated sessions.
+- **Host management** — Register, monitor, restart and delete
+  hosts, with cascading cleanup of associated sessions.
 
 ### Terminal UX
 
@@ -114,14 +250,45 @@ usage, model info, and session cost.
   in one browser window. Only the tab you are looking at has a
   live terminal and receives output; the others cost nothing, so
   many can stay open. Closing a tab leaves the session running.
-  Open tabs are restored when the page reloads. `Alt+1` goes to
-  the Dashboard and `Alt+2`..`Alt+9` to the session tabs.
+  On a desktop, drag a tab to move it; the Dashboard tab stays
+  first. Your open tabs and their order are saved to your login,
+  so they are the same on every device you sign in from (another
+  device picks up a change the next time it loads the page; the
+  selected tab and the split stay per device). `Alt+1` goes to
+  the Dashboard and `Alt+2`..`Alt+9` to the session tabs, in the
+  order shown.
+- **Host settings** — Each host has a **Settings** button next to
+  **Delete**. It lists the AI tools found on that host: switch one
+  off to hide its button there (the server then refuses to start
+  it, from any browser; sessions already running carry on), or
+  type a name to rename its button. Settings are per host. A tool
+  that is installed but not signed in keeps its button, with a
+  warning mark. A tool with saved settings that is no longer
+  found stays in the list, muted, and comes back as it was.
+- **Several accounts of one tool** — Extra configuration
+  directories with a signed-in account (`~/.claude-work`,
+  `~/.codex-team`, ...) are found by the daemon and each gets its
+  own button. See [Accounts](docs/agent-profiles.md#accounts-config_dirs).
+- **Plan limits** — Each host card shows, per AI account, how much
+  of the five hour and weekly allowance is used, read by the
+  daemon every five minutes. Click or tap an account for reset
+  times. See [Plan limits](docs/host-daemon.md#plan-limits) for
+  how it is read and how to turn it off.
+- **Rename sessions** — Right-click a session tab, or open the
+  settings cog while on one, and pick **Rename session**. Enter
+  saves, Escape cancels. Leave the name blank to go back to the
+  default tool and project label. The name is shared by every
+  browser looking at the dashboard.
 - **Attention marks** — A tab is marked when its session waits for
   a permission answer (red), finished working while you were not
   looking (blue), or ended (amber). The page title shows the total,
   the Dashboard tab counts sessions that have no tab, and the bell
   turns on browser notifications for when the page is in the
   background.
+- **Send files to a session** — Drag files onto a terminal: they are
+  saved on the session's host and their paths pasted at the prompt.
+  Works with every tool. See
+  [Sending Files to a Session](docs/host-daemon.md#sending-files-to-a-session).
 - **Detached terminal windows** — The **Detach** button moves a
   session from its tab to a standalone browser window for
   side-by-side multitasking.
@@ -138,8 +305,9 @@ usage, model info, and session cost.
 - **UTF-8 & multi-byte safety** — A byte buffer ensures
   multi-byte characters (box-drawing, emoji) are never split
   across reads.
-- **Touch scrolling** — Native vertical touch scrolling in
-  terminal viewports.
+- **Touch input** — On phones, swipes scroll the session and an
+  input bar adds the keys a phone keyboard lacks, plus a text
+  field with autocorrect and dictation.
 
 ### Telemetry & Monitoring
 - **Token breakdown** — Per-session tracking of input, output,
@@ -155,96 +323,92 @@ usage, model info, and session cost.
   `.mcp.json`, `~/.claude.json`, or `~/.gemini/settings.json`.
 - **Version & upgrade notification** — The dashboard header
   displays the current version (auto-detected from git tags at
-  build time) and checks GitHub for newer releases, showing a
-  subtle upgrade indicator when one is available.
+  build time) and checks the upstream project's GitHub releases,
+  showing a subtle upgrade indicator when one is available (an
+  upstream release is not merged into this fork automatically;
+  set `GITHUB_REPO` on the backend to watch another repository).
 
-## Getting Started
+## Manual setup
+
+Prefer [`./setup.sh`](#quick-start). These steps do the same by
+hand, for a hub and hosts on different machines or a containerized
+daemon.
 
 ### Prerequisites
 
 A container runtime with compose support on the hub server:
 
-| Distro | Command |
+| Platform | Command |
 |--------|---------|
 | Fedora / RHEL 9+ | `sudo dnf install podman podman-compose` |
 | Debian / Ubuntu | `sudo apt install podman podman-compose` or install [Docker Engine](https://docs.docker.com/engine/install/) |
-| macOS | `brew install podman podman-compose` or install [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+| macOS | [OrbStack](https://orbstack.dev/), [Docker Desktop](https://www.docker.com/products/docker-desktop/), or `brew install podman podman-compose` |
 
 > [!NOTE]
 > **macOS (Podman):** Podman on macOS runs containers inside
-> a Linux VM. Initialize and start it before running any
-> container commands:
-> ```bash
-> podman machine init
-> podman machine start
-> ```
-> You only need to run `init` once. After reboots, just run
+> a Linux VM. Initialize and start it once with
+> `podman machine init && podman machine start`; after reboots,
 > `podman machine start`.
 
-### 1. Start the Hub
+### 1. Configure and start the Hub
 
 ```bash
-git clone https://github.com/dustinblack/agent-dashboard.git
-cd agent-dashboard
+git clone https://github.com/jorgeferrarice/agent-dashboard-plus.git
+cd agent-dashboard-plus
+cp .env.example .env   # then fill in the values
 podman-compose build && podman-compose up -d
 ```
 
 The compose file starts two services:
 - **backend** on port `8000` — FastAPI + Socket.IO hub
-- **frontend** on port `8080` — React UI served by Nginx
+- **frontend** on port `8080` — React UI served by Nginx, which
+  also proxies the API and Socket.IO, so the browser only needs
+  port `8080`
 
 The SQLite database is persisted in a named volume
 (`dashboard_data`) that survives container restarts.
 
-> [!TIP]
-> Use `--no-cache` on subsequent builds after code changes:
-> ```bash
-> podman-compose build --no-cache && podman-compose up -d
-> ```
-
 > [!NOTE]
-> **Docker users:** Replace `podman-compose` with
+> **Docker / OrbStack users:** Replace `podman-compose` with
 > `docker compose` in all commands.
 
-### 2. Network Configuration
+### 2. Network and login
 
-By default the frontend connects to the backend on `localhost`.
-For remote access, create a `.env` file in the project root:
-
-```bash
-VITE_API_URL=http://your-server-ip:8000
-```
-
-Then rebuild: `podman-compose build --no-cache && podman-compose up -d`
-
-> [!NOTE]
-> **Firewall (firewalld):**
-> ```bash
-> sudo firewall-cmd --permanent --add-port={8080,8000}/tcp
-> sudo firewall-cmd --reload
-> ```
+Set `VITE_API_URL` in `.env` to the address the browser uses to
+reach the frontend (`http://localhost:8080`, or
+`https://your-domain` behind a tunnel or reverse proxy), then
+rebuild: `podman-compose build --no-cache && podman-compose up -d`.
 
 > [!IMPORTANT]
-> **Authentication is enforced by default.** `BYPASS_AUTH` is
-> commented out in `compose.yml`. For local development or
-> private lab networks without OIDC, uncomment it or add
-> `BYPASS_AUTH=true` to the backend environment in
-> `compose.yml`. For production, configure OIDC — see the
-> [Host Daemon Reference](docs/host-daemon.md).
+> **Authentication is enforced by default** with OIDC (Google
+> OAuth or any OIDC provider): set `OIDC_CLIENT_ID`,
+> `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL`, `SECRET_KEY` and
+> `ALLOWED_EMAILS` in `.env`, and register `<VITE_API_URL>/auth`
+> as the redirect URI. For a dashboard reached only from
+> `localhost`, `BYPASS_AUTH=true` turns login off — never expose it
+> that way. See [Security](#security).
 
 ### 3. Register a Host
 
-Register each development machine with the hub:
+Register each development machine with the hub (a logged-in
+session, or `BYPASS_AUTH=true`, is required):
 
 ```bash
-curl -X POST http://your-server-ip:8000/hosts \
+curl -X POST http://localhost:8000/hosts \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-dev-workstation", "host_token": "secret-token-123"}'
+  -d '{"name": "my-dev-workstation", "host_token": "<long random token>"}'
 ```
 
-### 4. Deploy the Host Daemon
+### 4. Run the Host Daemon
 
-Build the daemon container on each host machine:
+**Natively (recommended, what `./setup.sh` does):** put
+`HOST_TOKEN` in `.env` and run
+[`scripts/run-daemon-native.sh`](scripts/run-daemon-native.sh)
+under a supervisor that restarts it on any exit (launchd
+`KeepAlive`, systemd `Restart=always`). The daemon then sees the
+agent CLIs and accounts installed on the host.
+
+**In a container:**
 
 ```bash
 cd agent/
@@ -252,59 +416,42 @@ cd agent/
 # (only needed after adding or modifying profiles)
 python3 generate_containerfile.py
 podman build -t agent-dashboard-daemon -f Containerfile .
-```
 
-Run with minimum required configuration:
-
-```bash
 podman run -d --name host-daemon --network=host \
+  --restart=always \
   -e DASHBOARD_URL="http://your-server-ip:8000" \
-  -e HOST_TOKEN="secret-token-123" \
+  -e HOST_TOKEN="<the same token>" \
   -e PROJECTS_ROOT="/git" \
   -v /path/to/your/git:/git \
   -v $HOME/.ssh:/root/.ssh:ro \
   -v $HOME/.gitconfig:/root/.gitconfig:ro \
   -v $HOME/.claude/:/root/.claude \
   -v $HOME/.claude.json:/root/.claude.json:ro \
-  -v $HOME/.gemini/:/root/.gemini \
-  -v $HOME/.pi:/root/.pi \
-  -v $HOME/.opencode:/root/.opencode \
   -v $HOME/.codex:/root/.codex \
+  -v $HOME/.grok:/root/.grok \
   localhost/agent-dashboard-daemon:latest
 ```
 
-> [!TIP]
-> **Missing config directories:** The volume mounts above
-> expect agent config directories to exist on the host.
-> If you haven't used these tools locally, create them first:
-> ```bash
-> mkdir -p ~/.claude ~/.gemini ~/.pi/agent ~/.opencode ~/.codex
-> ```
-
-> [!TIP]
-> **Reconfiguring the daemon:** To change environment
-> variables or volume mounts, stop and remove the existing
-> container, then re-run with the new parameters:
-> ```bash
-> podman stop host-daemon && podman rm host-daemon
-> # Re-run the podman run command with updated settings
-> ```
+Create any missing config directory first
+(`mkdir -p ~/.claude ~/.codex ~/.grok`). `--restart=always` is
+needed for the dashboard's **Restart** button to bring the daemon
+back.
 
 > See the [Host Daemon Reference](docs/host-daemon.md) for the
 > full list of environment variables, volume mounts, and
 > authentication configuration. To run containers as systemd
-> services that start automatically on boot, see
-> [Running as a System Service](docs/systemd-quadlets.md).
+> services, see [Running as a System Service](docs/systemd-quadlets.md).
 
 ### 5. Use the Dashboard
 
-1. Open `http://your-server-ip:8080`
+1. Open `http://localhost:8080` (or your domain)
 2. Your registered hosts appear on the dashboard
-3. Click **Spawn Claude**, **Spawn Pi**, **Spawn Antigravity**,
-   **Spawn OpenCode**, **Spawn Codex**, or **Spawn Bash**
-4. Select a project directory from the dropdown
-5. Click a running session to attach in a tab
-6. Delete retired hosts via the trash icon
+3. Click a tool button on a host card (**Claude**, **Codex**,
+   **Grok**, **Bash**, one per detected account)
+4. Pick a project or folder, then spawn
+5. Click a running session to open it in a tab
+6. Use **Restart** if a host's sessions stop showing output, and
+   the trash icon to delete retired hosts
 
 ## Architecture
 
@@ -323,7 +470,7 @@ graph LR
         OTLP1["OTLP Receiver<br/>:4318"]
         subgraph tmux Sessions
             A1["Claude<br/>(tmux)"]
-            A2["Pi / agy<br/>(tmux)"]
+            A2["Codex / Grok<br/>(tmux)"]
         end
     end
 
@@ -445,12 +592,12 @@ graph LR
     end
 
     subgraph WT1 ["Worktree A"]
-        C2["Pi Agent"]
+        C2["Codex Agent"]
         B1["Bash Companion"]
     end
 
     subgraph WT2 ["Worktree B"]
-        G1["Antigravity Agent"]
+        G1["Grok Agent"]
     end
 
     GIT -.->|"creates"| WT1
@@ -468,7 +615,7 @@ graph LR
 
 In this example, three agents work on the same project without
 conflicts: one Claude agent works directly in the original repo,
-while a Pi agent (with a Bash companion) and an Antigravity agent
+while a Codex agent (with a Bash companion) and a Grok agent
 each have their own isolated worktree with a separate branch.
 
 ## Troubleshooting
@@ -493,7 +640,7 @@ strengths and trade-offs:
   - A web-based platform that provides multi-host orchestration and remote pseudo-terminal (PTY) access to AI agent sessions with live OpenTelemetry metrics. Supports optional git worktree isolation for running multiple agents on the same repository, real-time cost tracking, and companion session chaining.
   - **Ideal for:** Remote, web-based interaction with isolated AI agent sessions across multiple host machines via full PTY emulation.
   - **Not ideal for:** Users who prefer to work exclusively within a local, native terminal multiplexer.
-  - **Restrictions:** Only supports Claude Code, Pi, Antigravity, OpenCode, Codex, and Bash sessions. Does not orchestrate GUI-based agents, arbitrary scripts, or non-interactive processes.
+  - **Restrictions:** Ships profiles for Claude Code, Codex, Grok, and Bash sessions; other CLI agents need a profile. Does not orchestrate GUI-based agents, arbitrary scripts, or non-interactive processes.
 
 - **[Agent Commander](https://github.com/cvsloane/agent-commander)**
   - A mission-control dashboard and tmux-first manager for AI agent sessions across multiple hosts. Built with Next.js, Fastify, and a Go-based agent daemon. Features approval queues for agent governance, scoped memory systems, and scheduling with runtime reuse.
@@ -550,7 +697,7 @@ cd frontend && npm install && cd ..
 
 > [!IMPORTANT]
 > **AI agent development:** If you are using an AI coding agent
-> (Claude Code, Pi, etc.) to develop on this project,
+> (Claude Code, Codex, etc.) to develop on this project,
 > always install the pre-commit hook first. AI agents can
 > introduce formatting, linting, and type errors that slip past
 > review. The hook catches these automatically on every commit.
@@ -576,12 +723,10 @@ cd frontend && npm install && cd ..
 | `ci` | format + lint + typecheck + build + test + security + secrets |
 | `all` | ci + e2e + containers |
 
-### CI Pipeline
+### Continuous integration
 
-GitHub Actions runs on all PRs and pushes to `main`. The
-pipeline includes Python checks (formatting, linting, security,
-tests), frontend checks (formatting, linting, typecheck, build),
-secret detection (gitleaks), E2E tests, and container builds.
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+This fork has no GitHub Actions. Run `./scripts/check.sh ci`
+before pushing; it covers formatting, linting, type checks, the
+build, tests, security and secret detection.
 
 Coverage reports are generated at `coverage/backend/index.html`.

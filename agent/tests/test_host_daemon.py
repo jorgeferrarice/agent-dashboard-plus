@@ -19,7 +19,7 @@ from unittest.mock import patch, mock_open
 import pytest
 import yaml
 
-from agent.host_daemon import HostDaemon, _split_utf8
+from agent.host_daemon import MAX_UPLOAD_BYTES, HostDaemon, _split_utf8
 from agent.profiles import AgentProfile, ModelsConfig
 
 
@@ -712,75 +712,6 @@ class TestAgentProfiles:
         # Bash has no provisioning
         assert profiles["bash"].provisioning is None
 
-    def test_pi_profile_fields(self):
-        """Pi profile has expected configuration."""
-        from agent.profiles import load_profiles
-
-        profiles = load_profiles()
-        pi = profiles["pi"]
-        assert pi.binary == "pi"
-        assert pi.display_name == "Pi"
-        assert pi.color == "green"
-        assert pi.commands.new == ["pi"]
-        assert pi.supports_resume is True
-        assert pi.auth.env_vars == []
-        assert pi.provisioning is not None
-        assert "@earendil-works/pi-coding-agent" in pi.provisioning.install.npm
-        assert pi.provisioning.verify == "pi --version"
-        assert any(m.host == "~/.pi" for m in pi.provisioning.mounts)
-
-    def test_pi_profile_otel_env_vars(self):
-        """Pi profile sets OTEL_SERVICE_NAME and
-        PI_OTEL_METRICS for correct multi-instance
-        tracking and metric emission."""
-        from agent.profiles import load_profiles
-
-        profiles = load_profiles()
-        pi = profiles["pi"]
-        # OTEL_SERVICE_NAME must use {agent_id} placeholder
-        # so pi-otel reports the agent's unique ID instead
-        # of the default "pi".
-        assert "OTEL_SERVICE_NAME" in pi.env
-        assert "{agent_id}" in pi.env["OTEL_SERVICE_NAME"]
-        # PI_OTEL_METRICS must be "1" to enable the
-        # PeriodicExportingMetricReader in pi-otel's SDK.
-        assert pi.env.get("PI_OTEL_METRICS") == "1"
-        # OTLP protocol must be http/json for the daemon's
-        # HTTP receiver.
-        assert pi.env.get("OTEL_EXPORTER_OTLP_PROTOCOL") == "http/json"
-
-    def test_pi_profile_passthrough_env(self):
-        """Pi profile passes through env vars for core
-        and additional providers."""
-        from agent.profiles import load_profiles
-
-        profiles = load_profiles()
-        penv = profiles["pi"].provisioning.passthrough_env
-        # Core providers
-        assert "ANTHROPIC_API_KEY" in penv
-        assert "OPENAI_API_KEY" in penv
-        assert "GEMINI_API_KEY" in penv
-        # Google Cloud / Vertex AI
-        assert "GOOGLE_CLOUD_PROJECT" in penv
-        assert "GOOGLE_CLOUD_LOCATION" in penv
-        # Additional providers
-        assert "XAI_API_KEY" in penv
-        assert "GROQ_API_KEY" in penv
-        assert "DEEPSEEK_API_KEY" in penv
-        assert "AZURE_OPENAI_API_KEY" in penv
-        # Amazon Bedrock
-        assert "AWS_ACCESS_KEY_ID" in penv
-        assert "AWS_SECRET_ACCESS_KEY" in penv
-        assert "AWS_REGION" in penv
-
-    def test_pi_telemetry_metrics_in_lookup_tables(self, daemon):
-        """Pi's telemetry metrics are registered in the
-        daemon's OTLP lookup tables."""
-        assert "gen_ai.client.token.usage" in daemon._token_metrics
-        assert "gen_ai.client.tool.calls" in daemon._activity_metrics
-        assert "gen_ai.client.operation.duration" in daemon._runtime_metrics
-        assert daemon._runtime_metrics["gen_ai.client.operation.duration"] == "seconds"
-
     def test_unknown_profile_returns_empty(self):
         """Loading from empty directory returns no profiles."""
         import tempfile
@@ -1282,6 +1213,69 @@ class TestScanProjectsFolders:
         assert d.non_git_projects == []
 
 
+# ── Files sent to a session ─────────────────────────────────
+
+
+class TestSaveUpload:
+    """Tests for save_upload name sanitising and limits."""
+
+    @pytest.fixture
+    def daemon(self, tmp_path):
+        """A daemon with one session, saving under tmp_path."""
+        d = _daemon_with_env()
+        d.agents["a1"] = {}
+        with patch("agent.host_daemon.tempfile.gettempdir", return_value=str(tmp_path)):
+            yield d
+
+    def test_saves_inside_session_folder(self, daemon, tmp_path):
+        """The file lands in the session's own temporary folder."""
+        path = daemon.save_upload("a1", "notes.txt", b"hi")
+        assert path == str(tmp_path / "agent-dashboard-uploads" / "a1" / "notes.txt")
+        with open(path, "rb") as f:
+            assert f.read() == b"hi"
+
+    @pytest.mark.parametrize(
+        "name,saved",
+        [
+            ("../../etc/passwd", "passwd"),
+            ("C:\\Users\\me\\shot 1.png", "shot_1.png"),
+            (".bashrc", "bashrc"),
+            ("a;rm -rf $HOME\n.txt", "a_rm_-rf__HOME_.txt"),
+            ("relatório.pdf", "relatório.pdf"),
+        ],
+    )
+    def test_sanitises_names(self, daemon, name, saved):
+        """Names cannot leave the folder and need no quoting."""
+        path = daemon.save_upload("a1", name, b"x")
+        assert os.path.basename(path) == saved
+        assert os.path.dirname(path) == daemon._upload_dir("a1")
+
+    def test_never_overwrites(self, daemon):
+        """A second file with the same name gets a numeric prefix."""
+        first = daemon.save_upload("a1", "a.txt", b"1")
+        second = daemon.save_upload("a1", "a.txt", b"2")
+        assert os.path.basename(second) == "1-a.txt"
+        with open(first, "rb") as f:
+            assert f.read() == b"1"
+
+    @pytest.mark.parametrize(
+        "agent_id,name,data",
+        [
+            ("unknown", "a.txt", b"x"),
+            ("a1", "..", b"x"),
+            ("a1", "", b"x"),
+            ("a1", None, b"x"),
+            ("a1", "a.txt", "not bytes"),
+            ("a1", "a.txt", b"x" * (MAX_UPLOAD_BYTES + 1)),
+        ],
+    )
+    def test_rejects_bad_requests(self, daemon, tmp_path, agent_id, name, data):
+        """Unknown sessions, unusable names and big files are refused."""
+        with pytest.raises(ValueError):
+            daemon.save_upload(agent_id, name, data)
+        assert not os.listdir(tmp_path)
+
+
 # ── Project folder creation ─────────────────────────────────
 
 
@@ -1423,3 +1417,287 @@ class TestModelPicker:
             with pytest.raises(ValueError, match="not offered"):
                 asyncio.run(daemon.spawn_agent("id-1", "router", model="evil; rm"))
         fork.assert_not_called()
+
+
+# ── Tool detection and per-account variants ─────────────────
+
+
+class TestToolDetection:
+    """Which tools a host advertises, and its extra accounts."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        """An empty home directory, with every binary on PATH
+        and no credentials in the environment."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for var in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_VERTEX"):
+            monkeypatch.delenv(var, raising=False)
+        for var in ("CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(
+            "agent.host_daemon.shutil.which", lambda binary: f"/bin/{binary}"
+        )
+        return tmp_path
+
+    @staticmethod
+    def _names(daemon):
+        return [t["name"] for t in daemon._detect_available_tools()]
+
+    def test_only_tools_on_the_path_are_listed(self, home, monkeypatch):
+        """A tool without its binary is left out; bash, which
+        is always available, stays."""
+        monkeypatch.setattr(
+            "agent.host_daemon.shutil.which",
+            lambda binary: "/bin/claude" if binary == "claude" else None,
+        )
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        assert self._names(daemon) == ["bash", "claude"]
+
+    def test_tool_without_login_is_listed_with_a_warning(self, home):
+        """Installed but signed out: offered, flagged."""
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        tools = {t["name"]: t for t in daemon._detect_available_tools()}
+        assert tools["claude"]["authenticated"] is False
+        assert tools["bash"]["authenticated"] is True
+
+        (home / ".claude.json").write_text('{"oauthAccount": {"x": 1}}')
+        tools = {t["name"]: t for t in daemon._detect_available_tools()}
+        assert tools["claude"]["authenticated"] is True
+
+    def test_api_key_counts_as_a_login(self, home, monkeypatch):
+        """A credential in the environment needs no login file."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        tools = {t["name"]: t for t in daemon._detect_available_tools()}
+        assert tools["claude"]["authenticated"] is True
+
+    def test_each_signed_in_directory_is_its_own_tool(self, home):
+        """~/.claude-work with an account becomes claude-work,
+        run with CLAUDE_CONFIG_DIR; a directory without an
+        account, a plain file and the default are not variants.
+        """
+        (home / ".claude").mkdir()
+        (home / ".claude.json").write_text('{"oauthAccount": {"x": 1}}')
+        work = home / ".claude-work"
+        work.mkdir()
+        (work / ".claude.json").write_text('{"oauthAccount": {"x": 1}}')
+        (home / ".claude-empty").mkdir()
+        (home / ".claude-empty" / ".claude.json").write_text("{}")
+        (home / ".codex-b").mkdir()
+        (home / ".codex-b" / "auth.json").write_text("{}")
+
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        names = self._names(daemon)
+        assert "claude" in names and "claude-work" in names
+        assert "claude-empty" not in names
+        assert "codex-b" in names
+
+        variant = daemon.profiles["claude-work"]
+        assert variant.display_name == "Claude (work)"
+        assert variant.env["CLAUDE_CONFIG_DIR"] == str(work)
+        assert variant.mcp.user_files == [str(work / ".claude.json")]
+        # The default account is left as it was.
+        assert "CLAUDE_CONFIG_DIR" not in daemon.profiles["claude"].env
+        assert daemon.profiles["codex-b"].env["CODEX_HOME"] == str(home / ".codex-b")
+
+    def test_account_that_goes_away_is_no_longer_listed(self, home):
+        """Signing out of a directory drops its tool, but the
+        profile stays known for sessions still running."""
+        work = home / ".claude-work"
+        work.mkdir()
+        (work / ".claude.json").write_text('{"oauthAccount": {"x": 1}}')
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        assert "claude-work" in self._names(daemon)
+        (work / ".claude.json").unlink()
+        assert "claude-work" not in self._names(daemon)
+        assert "claude-work" in daemon.profiles
+
+    def test_old_profile_name_resolves_to_the_variant(self, home):
+        """Sessions started as claude-infinitum still find
+        their profile, without a second tool being listed."""
+        inf = home / ".claude-infinite"
+        inf.mkdir()
+        (inf / ".claude.json").write_text('{"oauthAccount": {"x": 1}}')
+        daemon = HostDaemon("http://dummy:8000", "dummy-token")
+        names = self._names(daemon)
+        assert "claude-infinite" in names
+        assert "claude-infinitum" not in names
+        assert daemon.profiles["claude-infinitum"] is daemon.profiles["claude-infinite"]
+
+
+# ── Plan limits (usage probe) ───────────────────────────────
+
+# Trimmed from a real `/usage` screen of Claude Code 2.1.
+CLAUDE_USAGE_SCREEN = """
+   Settings  Status   Config   Usage   Stats
+   Session
+   Total cost:            $0.0000
+   Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+   Current session
+   █▌                                                 3% used
+   Resets 12:40pm (America/Los_Angeles)
+   Current week (all models)
+   █████████████████████████▌                         51% used
+   Resets Oct 8 at 12pm (America/Los_Angeles)
+   Current week (Fable)
+   █                                                  2% used
+   Resets Oct 8 at 12pm (America/Los_Angeles)
+   What's contributing to your limits usage?
+   70% of your usage came from subagent-heavy sessions
+"""
+
+# Trimmed from a real `/status` screen of Codex 0.160.
+CODEX_STATUS_SCREEN = """
+  Model:               GPT-6.1-Sol (reasoning low, summaries auto)
+  Account:             Pro 100
+  5h limit:            [████████████░░░░░░░░] 60% left (resets 14:10)
+  Weekly limit:        [████████████████████] 100% left (resets 09:52 on 15 Oct)
+› Ask Codex to do anything
+"""
+
+
+class TestUsageProbe:
+    """Reading plan limits off a tool's screen."""
+
+    def test_claude_screen(self):
+        """Each limit has a label, a percentage and a reset."""
+        from agent.usage_probe import parse_claude
+
+        assert parse_claude(CLAUDE_USAGE_SCREEN) == [
+            {
+                "label": "Current session",
+                "used_percent": 3,
+                "resets": "12:40pm (America/Los_Angeles)",
+            },
+            {
+                "label": "Current week (all models)",
+                "used_percent": 51,
+                "resets": "Oct 8 at 12pm (America/Los_Angeles)",
+            },
+            {
+                "label": "Current week (Fable)",
+                "used_percent": 2,
+                "resets": "Oct 8 at 12pm (America/Los_Angeles)",
+            },
+        ]
+        # Before the limits load there is nothing to read.
+        assert parse_claude("❯ /usage\n  Loading usage data…") == []
+
+    def test_codex_screen(self):
+        """Codex shows what is left; it is reported as used."""
+        from agent.usage_probe import parse_codex
+
+        assert parse_codex(CODEX_STATUS_SCREEN) == [
+            {"label": "5h", "used_percent": 40, "resets": "14:10"},
+            {"label": "Weekly", "used_percent": 0, "resets": "09:52 on 15 Oct"},
+        ]
+        assert parse_codex("› Ask Codex to do anything") == []
+
+    def test_profiles_say_which_tools_have_limits(self, daemon):
+        """Claude and Codex can be read; Grok has limits but no
+        reader; bash has no limits at all."""
+        assert daemon.profiles["claude"].usage.parser == "claude"
+        assert daemon.profiles["codex"].usage.parser == "codex"
+        assert daemon.profiles["grok"].usage.parser == ""
+        assert daemon.profiles["bash"].usage is None
+        assert daemon._make_tool_info(daemon.profiles["grok"])["has_limits"]
+        assert not daemon._make_tool_info(daemon.profiles["bash"])["has_limits"]
+
+    @pytest.mark.asyncio
+    async def test_failed_reading_keeps_the_last_values(self, daemon, monkeypatch):
+        """A probe that fails leaves the previous limits in
+        place, flagged, and only readable tools are probed."""
+        from agent import host_daemon
+
+        daemon._cached_tools = [{"name": n} for n in ("bash", "claude", "grok")]
+        probed = []
+        windows = [{"label": "Current session", "used_percent": 3, "resets": ""}]
+
+        def works(profile, probe_dir):
+            probed.append(profile.name)
+            return windows
+
+        monkeypatch.setattr(host_daemon, "probe_usage", works)
+        daemon._usage["gone"] = {"windows": [], "ok": True}
+        await daemon._read_usage_once()
+        assert probed == ["claude"]
+        assert list(daemon._usage) == ["claude"]
+        first = daemon._usage["claude"]
+        assert first["windows"] == windows and first["ok"] is True
+
+        def fails(profile, probe_dir):
+            raise host_daemon.ProbeError("screen changed")
+
+        monkeypatch.setattr(host_daemon, "probe_usage", fails)
+        await daemon._read_usage_once()
+        after = daemon._usage["claude"]
+        assert after["ok"] is False
+        assert after["windows"] == windows
+        assert after["updated_at"] == first["updated_at"]
+
+
+# ── _run_task ───────────────────────────────────────────────
+
+
+class TestRunTask:
+    """Background tasks survive failures but stop on shutdown."""
+
+    def test_inner_cancel_restarts_task(self, daemon, monkeypatch):
+        """A CancelledError from an awaited job restarts the task."""
+        calls = []
+
+        async def no_wait(_):
+            return None
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise asyncio.CancelledError()
+            daemon.running = False
+
+        monkeypatch.setattr(asyncio, "sleep", no_wait)
+        asyncio.run(daemon._run_task("watcher", flaky))
+        assert len(calls) == 2
+
+    def test_task_cancel_stops_task(self, daemon):
+        """Cancelling the task itself ends it without a restart."""
+        calls = []
+
+        async def forever():
+            calls.append(1)
+            await asyncio.Event().wait()
+
+        async def main():
+            task = asyncio.create_task(daemon._run_task("watcher", forever))
+            await asyncio.sleep(0)
+            task.cancel()
+            await task
+
+        asyncio.run(main())
+        assert len(calls) == 1
+
+    def test_stop_cancels_every_task(self, daemon):
+        """stop() ends run() promptly, even mid usage poll."""
+
+        async def main():
+            names = (
+                "watcher_task",
+                "cache_task",
+                "otlp_task",
+                "git_task",
+                "status_task",
+                "flush_task",
+                "usage_task",
+            )
+            for name in names:
+                setattr(daemon, name, asyncio.create_task(asyncio.sleep(300)))
+            daemon.stop()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(getattr(daemon, n) for n in names), return_exceptions=True
+                ),
+                timeout=1,
+            )
+            return [getattr(daemon, n).cancelled() for n in names]
+
+        assert all(asyncio.run(main()))

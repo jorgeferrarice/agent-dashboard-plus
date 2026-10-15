@@ -6,19 +6,25 @@ services:
       context: .
       dockerfile: backend/Containerfile
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - dashboard_data:/app/data
     environment:
       - DATABASE_URL=sqlite:////app/data/agent_dashboard.db
-      # Authentication is enforced by default. To disable
-      # for local development, uncomment the next line:
-      # - BYPASS_AUTH=true
+      # Values come from .env (see .env.example; ./setup.sh
+      # writes it). BYPASS_AUTH=true turns login off: only for a
+      # dashboard reachable from this machine alone.
+      - BYPASS_AUTH=${BYPASS_AUTH:-false}
+      # Comma-separated e-mails allowed to sign in with OIDC.
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
       # Required when auth is enabled (BYPASS_AUTH unset):
-      # - SECRET_KEY=<generate-a-random-secret>
-      # - OIDC_CLIENT_ID=<your-oidc-client-id>
-      # - OIDC_CLIENT_SECRET=<your-oidc-client-secret>
-      # - OIDC_DISCOVERY_URL=<your-oidc-discovery-url>
+      - SECRET_KEY=${SECRET_KEY}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL}
+      # Trust X-Forwarded-Proto from the frontend nginx proxy so
+      # OIDC redirect URIs use https. Port 8000 is loopback-only.
+      - FORWARDED_ALLOW_IPS=*
     restart: unless-stopped
 
   frontend:
@@ -28,7 +34,7 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-}
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     depends_on:
       - backend
     restart: unless-stopped

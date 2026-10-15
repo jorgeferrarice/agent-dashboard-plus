@@ -14,6 +14,7 @@ import os
 import pty
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -29,7 +30,8 @@ from typing import Dict, Optional
 import socketio
 from aiohttp import web
 
-from agent.profiles import load_profiles
+from agent.profiles import discover_variants, load_profiles, profile_logged_in
+from agent.usage_probe import ProbeError, probe_usage
 
 logging.basicConfig(
     format="%(asctime)s %(message)s",
@@ -69,6 +71,10 @@ _SCAN_SKIP_AT_ROOT = frozenset(
 # This rejects empty names, path separators, "..", hidden
 # names and whitespace.
 _PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+
+# Largest file the UI may send to a session. Keep in sync with
+# MAX_UPLOAD_BYTES in backend/app/main.py.
+MAX_UPLOAD_BYTES = 90 * 1024 * 1024
 
 # Seconds to wait for a profile's model list endpoint.
 _MODEL_LIST_TIMEOUT = 5
@@ -199,6 +205,17 @@ class HostDaemon:
         self._tool_models: Dict[str, list] = {}
         # Load agent profiles from YAML/JSON configs
         self.profiles = load_profiles()
+        # Last reading of each tool's plan limits, by tool name:
+        # {"windows": [...], "updated_at": <epoch seconds of the
+        # last good reading>, "ok": <whether the last try
+        # worked>}. See update_usage().
+        self._usage: Dict[str, dict] = {}
+        # Seconds between readings; 0 turns the probe off.
+        self.usage_poll_seconds = int(os.getenv("USAGE_POLL_SECONDS", "300"))
+        # Empty folder the tools are opened in to be asked.
+        self.usage_probe_dir = os.path.expanduser(
+            os.getenv("USAGE_PROBE_DIR", "~/.cache/agent-dashboard/usage-probe")
+        )
         # Build OTLP metric lookup tables from profiles
         # for fast matching in handle_otlp().
         self._token_metrics: set = set()
@@ -221,7 +238,11 @@ class HostDaemon:
         for prof in self.profiles.values():
             all_patterns.extend(prof.permission_patterns)
         self.permission_patterns = [re.compile(p, re.IGNORECASE) for p in all_patterns]
-        self.sio = socketio.AsyncClient()
+        # aiohttp refuses WebSocket messages over 4 MB by default;
+        # an uploaded file arrives as one message.
+        self.sio = socketio.AsyncClient(
+            websocket_extra_options={"max_msg_size": MAX_UPLOAD_BYTES + 1024 * 1024}
+        )
         self.agents: Dict[str, Dict] = (
             {}
         )  # agent_id -> {master_fd, pid, tool, history, telemetry}
@@ -278,6 +299,18 @@ class HostDaemon:
             # data, so the user gets an up-to-date list.
             await self.scan_and_report_projects()
 
+        @self.sio.on("restart_daemon", namespace="/terminal")
+        async def on_restart_daemon(data):
+            """Stops the daemon so its supervisor starts a new one.
+
+            Sent by the dashboard's Restart button. The process
+            exits once run() unwinds; the launchd KeepAlive job
+            (or the container restart policy) brings it back.
+            Every session on this host ends with it.
+            """
+            log.info("Restart requested from the dashboard.")
+            self.stop()
+
         @self.sio.on("create_project", namespace="/terminal")
         async def on_create_project(data):
             """Creates a project folder requested from the UI.
@@ -302,6 +335,28 @@ class HostDaemon:
                 log.info(f"Failed to create project folder: {e}")
                 return {"ok": False, "error": "Could not create the folder."}
             await self.scan_and_report_projects()
+            return {"ok": True, "path": path}
+
+        @self.sio.on("upload_file", namespace="/terminal")
+        async def on_upload_file(data):
+            """Saves a file dropped on a session's terminal.
+
+            data: {'agent_id': '...', 'name': '...', 'data': bytes}
+
+            Returns:
+                Acknowledgement dict: {'ok': True, 'path': ...}
+                or {'ok': False, 'error': '...'}.
+            """
+            data = data or {}
+            try:
+                path = self.save_upload(
+                    data.get("agent_id"), data.get("name"), data.get("data")
+                )
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            except OSError as e:
+                log.info(f"Failed to save uploaded file: {e}")
+                return {"ok": False, "error": "Could not save the file."}
             return {"ok": True, "path": path}
 
         @self.sio.on("list_models", namespace="/terminal")
@@ -632,6 +687,63 @@ class HostDaemon:
         log.info(f"Created project folder {path} (git_init={git_init})")
         return path
 
+    def _upload_dir(self, agent_id: str) -> str:
+        """Returns the folder holding files sent to one session."""
+        return os.path.join(tempfile.gettempdir(), "agent-dashboard-uploads", agent_id)
+
+    def save_upload(self, agent_id, name, data) -> str:
+        """Saves a file sent from the UI where the session can read it.
+
+        The file goes to a per-session folder in the system
+        temporary directory, outside the project, so it never
+        shows up in git. The folder is removed when the session
+        ends.
+
+        The name comes from the UI and is untrusted: only its
+        last path component is kept, and every character that is
+        not a letter, digit, '.', '_' or '-' becomes '_'. The
+        result can never leave the session's folder and needs no
+        quoting when pasted into a terminal. A file that already
+        exists is never overwritten; the new one gets a numeric
+        prefix.
+
+        Args:
+            agent_id: ID of the running session the file is for.
+            name: File name as given by the browser.
+            data: File contents.
+
+        Returns:
+            Absolute path of the saved file.
+
+        Raises:
+            ValueError: If the session is not running here, the
+                name is unusable, or the file is too large.
+            OSError: If the file cannot be written.
+        """
+        if agent_id not in self.agents:
+            raise ValueError("This session is not running.")
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("No file contents received.")
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError("The file is too large.")
+        if not isinstance(name, str):
+            raise ValueError("Invalid file name.")
+        base = os.path.basename(name.replace("\\", "/"))
+        safe = re.sub(r"[^\w.-]", "_", base).lstrip(".")[-200:]
+        if not safe:
+            raise ValueError("Invalid file name.")
+        folder = self._upload_dir(agent_id)
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        path = os.path.join(folder, safe)
+        count = 1
+        while os.path.exists(path):
+            path = os.path.join(folder, f"{count}-{safe}")
+            count += 1
+        with open(path, "wb") as f:
+            f.write(data)
+        log.info(f"Saved uploaded file {path} ({len(data)} bytes)")
+        return path
+
     def _fetch_models(self, profile) -> tuple:
         """Builds the model list offered for a profile.
 
@@ -658,18 +770,8 @@ class HostDaemon:
             names.insert(0, cfg.default)
         if not cfg.list_url:
             return names, None
-        headers = {"Accept": "application/json"}
-        token = profile.env.get(cfg.auth_env) if cfg.auth_env else None
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         try:
-            # list_url comes from a profile file on disk, not
-            # from user input.
-            req = urllib.request.Request(cfg.list_url, headers=headers)
-            with urllib.request.urlopen(  # nosec B310
-                req, timeout=_MODEL_LIST_TIMEOUT
-            ) as resp:
-                payload = json.load(resp)
+            payload = self._get_json(profile, cfg.list_url)
         except urllib.error.HTTPError as e:
             return names, f"Model list request failed (HTTP {e.code})."
         except (OSError, ValueError) as e:
@@ -692,6 +794,34 @@ class HostDaemon:
             if isinstance(item, str) and item and item not in names:
                 names.append(item)
         return names, None
+
+    def _get_json(self, profile, url: str):
+        """GETs a JSON document with the profile's bearer token.
+
+        Args:
+            profile: AgentProfile with a ``models`` section.
+            url: URL to fetch.
+
+        Returns:
+            The decoded JSON payload.
+
+        Raises:
+            urllib.error.HTTPError: On a non-2xx response.
+            OSError: If the endpoint is unreachable.
+            ValueError: If the body is not valid JSON.
+        """
+        cfg = profile.models
+        headers = {"Accept": "application/json"}
+        token = profile.env.get(cfg.auth_env) if cfg.auth_env else None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        # The URL comes from a profile file on disk, not from
+        # user input.
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(  # nosec B310
+            req, timeout=_MODEL_LIST_TIMEOUT
+        ) as resp:
+            return json.load(resp)
 
     def _refresh_tool_models(self, profile) -> tuple:
         """Fetches a profile's model list and remembers it.
@@ -729,6 +859,12 @@ class HostDaemon:
             "color": profile.color or "slate",
             "supports_resume": profile.supports_resume,
             "has_model": bool(profile.telemetry.token_metrics),
+            # False when the tool is installed but no login
+            # was found: the UI offers it with a warning.
+            "authenticated": profile.always_available or profile_logged_in(profile),
+            # The tool has plan limits (a usage section in its
+            # profile), whether or not they can be read.
+            "has_limits": profile.usage is not None,
         }
         # Tools with a model picker also report the names the
         # user may choose from. The list is remembered so a
@@ -741,60 +877,61 @@ class HostDaemon:
                 info["models_error"] = error
         return info
 
-    def _detect_available_tools(self) -> list:
-        """Detects which agent CLI tools are installed and
-        configured on this host using agent profiles.
+    def _discover_variants(self):
+        """Adds a profile for every extra account found on the
+        host (see ``discover_variants``), plus the old names
+        that now resolve to one.
 
-        For each profile, checks if the binary is present
-        and if the required auth env vars are set. Profiles
-        with always_available=true (e.g. bash) are included
-        unconditionally.
+        Profiles are only ever added: a variant whose directory
+        disappeared stays known, so its running sessions keep
+        working, and is simply no longer advertised. A profile
+        written by hand wins over a discovered one of the same
+        name.
+        """
+        for profile in list(self.profiles.values()):
+            for variant in discover_variants(profile):
+                if variant.name not in self.profiles:
+                    self.profiles[variant.name] = variant
+                    log.info(
+                        f"Found account for {profile.display_name}: " f"{variant.name}"
+                    )
+            aliases = profile.config_dirs.aliases if profile.config_dirs else {}
+            for old, current in aliases.items():
+                if old not in self.profiles and current in self.profiles:
+                    self.profiles[old] = self.profiles[current]
+
+    def _detect_available_tools(self) -> list:
+        """Detects which agent CLI tools are installed on this
+        host using agent profiles.
+
+        A tool is available when its binary is on the PATH.
+        Whether it is signed in does not hide it: that is
+        reported as ``authenticated`` so the UI can warn.
+        Profiles with always_available=true (e.g. bash) are
+        included unconditionally. Each extra account found for
+        a tool is listed as a tool of its own, as long as its
+        directory still holds a login.
 
         Returns:
-            List of tool info dicts with name,
-            display_name, color, and supports_resume.
+            List of tool info dicts (see ``_make_tool_info``).
         """
+        try:
+            self._discover_variants()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            log.error(f"Account discovery failed: {e}")
         tools = []
-        for profile in self.profiles.values():
-            if profile.always_available:
-                tools.append(self._make_tool_info(profile))
+        for key, profile in self.profiles.items():
+            # An alias is another name for a profile listed
+            # under its own.
+            if key != profile.name:
                 continue
-            # Check if binary exists. Use a generous
-            # timeout because some tools (e.g. Pi) load
-            # extensions during --version, which can take
-            # several seconds under load.
-            try:
-                subprocess.run(
-                    [profile.binary, "--version"],
-                    capture_output=True,
-                    timeout=15,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            # Check auth requirements
-            if not profile.auth.env_vars:
-                tools.append(self._make_tool_info(profile))
-                continue
-            if profile.auth.require == "all":
-                if all(os.getenv(v) for v in profile.auth.env_vars):
-                    tools.append(self._make_tool_info(profile))
-                else:
-                    log.info(
-                        f"{profile.display_name} CLI found "
-                        f"but auth not configured — "
-                        f"not advertising."
-                    )
-            else:
-                if any(os.getenv(v) for v in profile.auth.env_vars):
-                    tools.append(self._make_tool_info(profile))
-                else:
-                    log.info(
-                        f"{profile.display_name} CLI found "
-                        f"but auth not configured — "
-                        f"not advertising."
-                    )
-        log.info(f"Available tools: {tools}")
+            if not profile.always_available:
+                if not profile.binary or not shutil.which(profile.binary):
+                    continue
+                if profile.is_variant and not profile_logged_in(profile):
+                    continue
+            tools.append(self._make_tool_info(profile))
+        log.info(f"Available tools: {[t['name'] for t in tools]}")
         return tools
 
     async def scan_and_report_projects(self):
@@ -838,9 +975,62 @@ class HostDaemon:
                     "non_git_projects": list(self.non_git_projects),
                     "new_projects_dir": self.new_projects_dir,
                     "available_tools": tools,
+                    # Plan limits read so far, by tool name.
+                    "usage": dict(self._usage),
                 },
                 namespace="/terminal",
             )
+
+    async def update_usage(self):
+        """Reads the plan limits of every advertised tool, every
+        ``USAGE_POLL_SECONDS`` (default 300), and reports them
+        with the host telemetry.
+
+        Each reading opens the tool in a throwaway session (see
+        ``agent.usage_probe``), one tool at a time, in a worker
+        thread so sessions keep flowing. A failed reading keeps
+        the previous values and marks them ``ok: False``: the UI
+        shows them dimmed, with their age. Set
+        ``USAGE_POLL_SECONDS=0`` to turn this off.
+        """
+        if self.usage_poll_seconds <= 0:
+            log.info("Usage probe disabled (USAGE_POLL_SECONDS=0).")
+            return
+        # Let the first tool detection finish.
+        await asyncio.sleep(15)
+        while self.running:
+            await self._read_usage_once()
+            await asyncio.sleep(self.usage_poll_seconds)
+
+    async def _read_usage_once(self):
+        """Probes every advertised tool that has a way to read
+        its limits, updates ``self._usage`` and reports it.
+        """
+        loop = asyncio.get_running_loop()
+        names = [t["name"] for t in getattr(self, "_cached_tools", None) or []]
+        for name in names:
+            profile = self.profiles.get(name)
+            if not profile or not profile.usage or not profile.usage.parser:
+                continue
+            entry = dict(self._usage.get(name) or {"windows": []})
+            try:
+                entry["windows"] = await loop.run_in_executor(
+                    None, probe_usage, profile, self.usage_probe_dir
+                )
+                entry["updated_at"] = time.time()
+                entry["ok"] = True
+            except ProbeError as e:
+                log.info(f"Usage probe failed: {e}")
+                entry["ok"] = False
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                log.error(f"Usage probe crashed for {name}: {e}")
+                entry["ok"] = False
+            self._usage[name] = entry
+        # Forget tools that are no longer offered.
+        for gone in set(self._usage) - set(names):
+            del self._usage[gone]
+        if names and self.sio.connected:
+            await self.report_projects()
 
     @staticmethod
     def _remote_to_web_url(remote_url: str) -> Optional[str]:
@@ -1571,6 +1761,8 @@ class HostDaemon:
                     os.unlink(sidecar)
                 except OSError:
                     pass
+            # Remove files the user sent to this session
+            shutil.rmtree(self._upload_dir(agent_id), ignore_errors=True)
             # Clean up git worktree if one was created
             wt_path = self.agents[agent_id].get("worktree_path")
             wt_branch = self.agents[agent_id].get("worktree_branch")
@@ -2259,7 +2451,17 @@ class HostDaemon:
                     # project dir for project name and remote
                     # URL so the card doesn't show the worktree
                     # directory name.
-                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                    cwd = subprocess.check_output(
+                        [
+                            "tmux",
+                            "display-message",
+                            "-p",
+                            "-t",
+                            agent_id,
+                            "#{pane_current_path}",
+                        ],
+                        text=True,
+                    ).strip()
                     orig = info.get("original_project_dir")
                     branch, project, remote_url = self.get_git_info(cwd)
                     if orig and orig != cwd:
@@ -2334,11 +2536,20 @@ class HostDaemon:
                 await coro()
                 return
             except asyncio.CancelledError:
-                return
+                # A cancel aimed at this task is a shutdown. A
+                # CancelledError raised by something the task
+                # awaited (e.g. a cancelled executor job) is not:
+                # returning on it once stopped the PTY watcher
+                # for good, without a log line, and every
+                # terminal went blank.
+                task = asyncio.current_task()
+                if not self.running or (task and task.cancelling()):
+                    return
+                log.info(f"Background task '{name}' was cancelled from inside")
             except Exception as e:
                 log.info(f"Background task '{name}' failed: {e}")
-                log.info(f"Restarting '{name}' in 5 seconds...")
-                await asyncio.sleep(5)
+            log.info(f"Restarting '{name}' in 5 seconds...")
+            await asyncio.sleep(5)
 
     async def run(self):
         """Connects to the hub and starts all background tasks."""
@@ -2368,6 +2579,9 @@ class HostDaemon:
             self.flush_task = asyncio.create_task(
                 self._run_task("flush", self.flush_output)
             )
+            self.usage_task = asyncio.create_task(
+                self._run_task("usage", self.update_usage)
+            )
 
             await asyncio.gather(
                 self.watcher_task,
@@ -2376,6 +2590,7 @@ class HostDaemon:
                 self.git_task,
                 self.status_task,
                 self.flush_task,
+                self.usage_task,
             )
         except asyncio.CancelledError:
             pass
@@ -2395,14 +2610,21 @@ class HostDaemon:
         """Signals all background tasks to stop."""
         log.info("\nShutting down daemon...")
         self.running = False
-        if hasattr(self, "watcher_task") and not self.watcher_task.done():
-            self.watcher_task.cancel()
-        if hasattr(self, "cache_task") and not self.cache_task.done():
-            self.cache_task.cancel()
-        if hasattr(self, "git_task") and not self.git_task.done():
-            self.git_task.cancel()
-        if hasattr(self, "status_task") and not self.status_task.done():
-            self.status_task.cancel()
+        # Every task run() gathers: one left sleeping (the usage
+        # poll waits minutes) keeps the daemon alive, still
+        # holding the OTLP port, after launchd starts a new one.
+        for name in (
+            "watcher_task",
+            "cache_task",
+            "otlp_task",
+            "git_task",
+            "status_task",
+            "flush_task",
+            "usage_task",
+        ):
+            task = getattr(self, name, None)
+            if task and not task.done():
+                task.cancel()
 
 
 def _reap_zombies():

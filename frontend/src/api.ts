@@ -22,6 +22,43 @@ export interface ToolInfo {
   default_model?: string;
   /** Why the live model list could not be fetched. */
   models_error?: string;
+  /** False when the tool is installed but the daemon found no
+   *  login for it. Missing on older daemons. */
+  authenticated?: boolean;
+  /** Whether the tool has plan limits at all (bash has none).
+   *  They may still be unreadable: see Host.projects.usage. */
+  has_limits?: boolean;
+}
+
+/** One plan limit of a tool, e.g. the five hour window. */
+export interface UsageWindow {
+  /** As the tool names it: "Current session", "Weekly", ... */
+  label: string;
+  /** 0 to 100. */
+  used_percent: number;
+  /** When it resets, in the tool's own words; may be empty. */
+  resets: string;
+}
+
+/** A tool's plan limits, as last read by the host daemon. */
+export interface ToolUsage {
+  windows: UsageWindow[];
+  /** Epoch seconds of the last successful reading. */
+  updated_at?: number;
+  /** False when the latest reading failed: `windows` is then
+   *  the last good one, and may be old. */
+  ok?: boolean;
+}
+
+/** What the user chose for one AI tool on one host. Only tools
+ *  the user changed have one; the rest are enabled and keep
+ *  their default name. */
+export interface ToolSetting {
+  /** Profile name the daemon reports for the tool. */
+  tool: string;
+  enabled: boolean;
+  /** Name shown on the spawn button; null for the default. */
+  label: string | null;
 }
 
 /**
@@ -53,7 +90,11 @@ export interface Host {
     /** Directory where folders created from the UI land. */
     new_projects_dir?: string;
     available_tools?: (string | ToolInfo)[];
+    /** Plan limits by tool name. A tool with limits and no
+     *  entry here has not been read, or cannot be. */
+    usage?: Record<string, ToolUsage>;
   };
+  tool_settings?: ToolSetting[];
 }
 
 export interface Agent {
@@ -68,6 +109,8 @@ export interface Agent {
   telemetry?: {
     project_dir?: string;
     task_description?: string;
+    /** Name the user gave the session; shown on its tab. */
+    session_name?: string;
     git_branch?: string;
     git_project?: string;
     git_remote_url?: string;
@@ -94,6 +137,28 @@ export const getHosts = async (): Promise<Host[]> => {
   return response.data;
 };
 
+/**
+ * Enables, disables or renames an AI tool on a host. Fields
+ * left out keep their value; a blank label restores the
+ * default name. Resolves to all the host's tool settings.
+ */
+export const updateToolSetting = async (
+  hostId: number,
+  tool: string,
+  change: { enabled?: boolean; label?: string },
+): Promise<ToolSetting[]> => {
+  const response = await api.put(
+    `/hosts/${hostId}/tools/${encodeURIComponent(tool)}/settings`,
+    change,
+  );
+  return response.data;
+};
+
+/** Restarts a host's daemon. Ends every session on the host. */
+export const restartHost = async (id: number): Promise<void> => {
+  await api.post(`/hosts/${id}/restart`);
+};
+
 export const deleteHost = async (id: number): Promise<void> => {
   await api.delete(`/hosts/${id}`);
 };
@@ -113,6 +178,7 @@ export const spawnAgent = async (
   cols?: number,
   rows?: number,
   model?: string,
+  sessionName?: string,
 ): Promise<Agent> => {
   const response = await api.post('/agents/spawn', {
     host_id: hostId,
@@ -124,6 +190,7 @@ export const spawnAgent = async (
     cols: cols || 120,
     rows: rows || 40,
     model,
+    session_name: sessionName || undefined,
   });
   return response.data;
 };
@@ -156,6 +223,46 @@ export const updateTaskDescription = async (
   await api.patch(`/agents/${agentId}/task-description`, {
     task_description: taskDescription,
   });
+};
+
+/**
+ * Reads the session tabs the logged-in user has open, in order.
+ * Resolves to null when the user has never saved any.
+ */
+export const getOpenTabs = async (): Promise<string[] | null> => {
+  const response = await api.get('/me/tabs');
+  return response.data.tabs ?? null;
+};
+
+/** Saves the logged-in user's open session tabs, in order. */
+export const saveOpenTabs = async (agentIds: string[]): Promise<void> => {
+  await api.put('/me/tabs', { tabs: agentIds });
+};
+
+/** Renames a session's tab. A blank name restores the
+ *  default tool and project label. */
+export const renameSession = async (
+  agentId: string,
+  sessionName: string,
+): Promise<void> => {
+  await api.patch(`/agents/${agentId}/session-name`, {
+    session_name: sessionName,
+  });
+};
+
+/**
+ * Sends a file to the host a session runs on and resolves to
+ * its absolute path there. Rejects with the reason (too large,
+ * host offline) in `response.data.detail`.
+ */
+export const uploadFile = async (
+  agentId: string,
+  file: File,
+): Promise<string> => {
+  const form = new FormData();
+  form.append('file', file);
+  const response = await api.post(`/agents/${agentId}/files`, form);
+  return response.data.path;
 };
 
 export interface AgentDetail extends Agent {

@@ -31,8 +31,6 @@ podman run -d --name host-daemon --network=host \
     -v "$HOME/.claude.json:$HOME/.claude.json:ro" \
     -v "$HOME/.ssh:/root/.ssh:ro" \
     -v "$HOME/.claude:/root/.claude" \
-    -v "$HOME/.claude-infinite:/root/.claude-infinite" \
-    -v "$HOME/.claude-omniroute:/root/.claude-omniroute" \
     -v "$HOME/.claude.json:/root/.claude.json:ro" \
     -v "$HOME/.codex:/root/.codex" \
     -v "$HOME/.grok:/root/.grok" \

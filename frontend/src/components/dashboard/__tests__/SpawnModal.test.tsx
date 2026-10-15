@@ -1,5 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import SpawnModal from '../SpawnModal';
 import type { SpawnModalProps } from '../SpawnModal';
 import type { Host } from '../../../api';
@@ -39,6 +46,16 @@ const worktreeToggle = () =>
 const initialize = () =>
   screen.getByRole('button', { name: 'Initialize Agent' });
 
+beforeEach(() => {
+  // Node's own localStorage global shadows jsdom's and is
+  // unusable without a backing file: use an in-memory one.
+  const store = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => store.set(key, value),
+  });
+});
+
 describe('SpawnModal', () => {
   it('shows loading until the host reports projects', () => {
     renderModal({ host: host(undefined) });
@@ -74,6 +91,7 @@ describe('SpawnModal', () => {
       'resume',
       false,
       undefined,
+      undefined,
     );
   });
 
@@ -93,6 +111,7 @@ describe('SpawnModal', () => {
       'new',
       false,
       undefined,
+      undefined,
     );
   });
 
@@ -111,6 +130,17 @@ describe('SpawnModal', () => {
     expect(onSpawn).not.toHaveBeenCalled();
   });
 
+  it('passes the trimmed session name, or none when left empty', () => {
+    const { onSpawn } = renderModal();
+    fireEvent.click(initialize());
+    expect(onSpawn.mock.calls[0][5]).toBeUndefined();
+    fireEvent.change(screen.getByLabelText('Session Name (Optional)'), {
+      target: { value: '  login fix ' },
+    });
+    fireEvent.click(initialize());
+    expect(onSpawn.mock.calls[1][5]).toBe('login fix');
+  });
+
   it('hides the model selector for tools without models', () => {
     renderModal();
     expect(screen.queryByLabelText('Model')).not.toBeInTheDocument();
@@ -126,6 +156,35 @@ describe('SpawnModal', () => {
     fireEvent.click(screen.getByRole('option', { name: 'General Usage' }));
     fireEvent.click(initialize());
     expect(onSpawn.mock.calls[1][4]).toBe('General Usage');
+  });
+
+  it('offers the last five spawned models as quick picks', () => {
+    const models = ['a', 'b', 'c', 'd', 'e', 'f', 'gone'];
+    renderModal({ models, defaultModel: 'a' });
+    expect(screen.queryByRole('group', { name: 'Recent models' })).toBeNull();
+    for (const m of ['gone', 'a', 'b', 'c', 'd', 'e', 'f', 'e']) {
+      fireEvent.click(screen.getByRole('option', { name: m }));
+      fireEvent.click(initialize());
+    }
+    cleanup();
+
+    // Newest first, deduplicated, capped at five, and without
+    // models the host no longer offers.
+    const { onSpawn } = renderModal({
+      models: models.filter((m) => m !== 'gone'),
+      defaultModel: 'a',
+    });
+    const recent = within(screen.getByRole('group', { name: 'Recent models' }));
+    expect(recent.getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'e',
+      'f',
+      'd',
+      'c',
+      'b',
+    ]);
+    fireEvent.click(recent.getByRole('button', { name: 'd' }));
+    fireEvent.click(initialize());
+    expect(onSpawn.mock.calls[0][4]).toBe('d');
   });
 
   it('replaces the model choices with the live list on open', async () => {

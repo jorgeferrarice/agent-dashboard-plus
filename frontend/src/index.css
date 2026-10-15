@@ -38,6 +38,28 @@
   }
 }
 
+/* The app fills the visible area (see main.tsx) and keeps
+   clear of notches and the home indicator. */
+html,
+body {
+  background-color: var(--color-slate-900);
+  overscroll-behavior: none;
+}
+.app-root {
+  height: var(--app-height, 100dvh);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* iOS zooms into any focused field under 16px. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
 /* Ensure xterm fills its container */
 .xterm,
 .xterm-viewport,

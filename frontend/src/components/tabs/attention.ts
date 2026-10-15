@@ -93,8 +93,10 @@ export function attentionOf(
   return done.has(agent.agent_id) ? 'done' : null;
 }
 
-/** Tab label for a session: tool and project. */
+/** Tab label for a session: the name the user gave it, else
+ *  tool and project. */
 export function tabLabel(agent: Agent): string {
+  if (agent.telemetry?.session_name) return agent.telemetry.session_name;
   const dir =
     agent.telemetry?.git_project ||
     agent.telemetry?.project_dir?.split('/').filter(Boolean).pop();

@@ -53,7 +53,7 @@ commands:
 | `name` | string | **yes** | — | Unique identifier used in spawn requests and internal lookups. Must match the filename (e.g., `claude` for `claude.yaml`). |
 | `display_name` | string | no | `""` | Human-readable name shown in UI buttons, badges, and logs. |
 | `color` | string | no | `"slate"` | UI theme color keyword for spawn buttons and badges. Supported: `purple`, `blue`, `slate`, `green`, `red`, `amber`, `cyan`. |
-| `binary` | string | no | `""` | CLI binary name. Used for availability detection via `<binary> --version`. |
+| `binary` | string | no | `""` | CLI binary name. The tool is available on a host when this binary is on the daemon's `PATH`. |
 | `always_available` | bool | no | `false` | If true, skip binary and auth checks — always show as available (e.g., `bash`). |
 | `env` | map | no | `{}` | Environment variables injected at agent spawn time. Values support `{otlp_port}` and `{agent_id}` placeholders. |
 | `permission_patterns` | list | no | `[]` | Regex patterns (case-insensitive) for detecting permission prompts in terminal output. Merged with built-in defaults (`Y/n`, `yes/no`, `Continue?`, etc.). |
@@ -69,7 +69,7 @@ commands:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `auth.env_vars` | list | no | `[]` | Environment variable names to check for authentication. If empty, the tool is available whenever the binary exists. |
+| `auth.env_vars` | list | no | `[]` | Environment variable names to check for authentication. A tool whose variables are missing is still offered, with a "not signed in" warning on its button. |
 | `auth.require` | string | no | `"any"` | `"any"` = at least one env var must be set. `"all"` = all must be set. |
 
 #### `mcp`
@@ -197,8 +197,8 @@ for new and resumed sessions alike:
 models:
   model_env: ANTHROPIC_MODEL   # variable the choice is exported as
   default: auto                # used when the user picks nothing
-  static: [auto, auto/fast]    # names always offered
-  list_url: "http://host.containers.internal:20128/v1/models"
+  static: [auto]               # names always offered
+  list_url: "http://localhost:4000/v1/models"
   auth_env: ANTHROPIC_AUTH_TOKEN   # profile env key with the Bearer token
 ```
 
@@ -210,29 +210,69 @@ a JSON list or an object holding the list under `combos`, `data` or
 request fails, the static names are still offered and the dialog shows
 the reason. The daemon only accepts a model it offered.
 
-## OmniRoute
+## Accounts (`config_dirs`)
 
-The bundled `omniroute` profile runs Claude Code through a local
-[OmniRoute](https://github.com/diegosouzapw/OmniRoute) gateway, which
-distributes requests across providers. The spawn dialog lists
-OmniRoute's whole model catalog: auto-routing names, the combos from its
-dashboard and every provider model.
+Some tools keep everything about an account in one directory
+and let an environment variable point them at another one. If
+you use two accounts of the same tool — say a personal and a
+work Claude subscription — the daemon finds them and shows
+each as its own button on the host.
 
-1. Create an API key in the OmniRoute dashboard under **Endpoints**.
-2. Put it in `agent/profiles/omniroute.local.yaml` (keep this file out
-   of git):
+You do not write a profile per account. Sign in once per
+directory, for example:
 
-   ```yaml
-   env:
-     ANTHROPIC_AUTH_TOKEN: "<your key>"
-   ```
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-work claude   # then /login
+```
 
-3. Mount a config directory at `/root/.claude-omniroute` and rebuild
-   the daemon image.
+and `~/.claude-work` shows up as a tool named `claude-work`,
+labelled "Claude (work)". Press the refresh button on the host
+card to make the daemon look again; no restart is needed. You
+can give the button a friendlier name in the host's
+**Settings**.
 
-The key is baked into the image and visible to processes inside the
-container. Without it the tool still appears, and sessions fail with
-HTTP 401.
+The rules are declared in the tool's profile:
+
+```yaml
+config_dirs:
+  env: CLAUDE_CONFIG_DIR       # variable that selects the directory
+  glob: "~/.claude*"           # where to look
+  default: "~/.claude"         # the profile itself, not a variant
+  login_file: .claude.json     # present once an account is signed in
+  default_login_file: "~/.claude.json"  # where the default keeps it
+  login_key: oauthAccount      # JSON key that must be there
+  aliases:                     # old tool names -> variant name
+    claude-infinitum: claude-infinite
+```
+
+| Field | Description |
+|-------|-------------|
+| `env` | Variable set to the directory when a variant is started. |
+| `glob` | Pattern for candidate directories. Only directories count. |
+| `default` | Directory used when `env` is unset. It is the base profile. |
+| `login_file` | File, inside a directory, that exists once signed in. A directory without it is not offered. |
+| `default_login_file` | Path of that file for the default directory, if the tool keeps it elsewhere. |
+| `login_key` | Optional. `login_file` is read as JSON and must have this top-level key. |
+| `aliases` | Optional. Tool names used by older sessions, mapped to the variant that replaced them, so they still resume. |
+
+A variant is a copy of the profile with `env` set, named
+`<profile>-<suffix>` where the suffix is the directory name
+without the leading dot and the profile name
+(`~/.codex-team` → `codex-team`). Paths under `default` in
+`mcp.user_files` and `spawn_settings` follow the variant's
+directory. A hand-written profile with the same name wins.
+
+The daemon only checks that the login file (or key) exists. It
+never reads, sends or logs credentials. The same check drives
+the "not signed in" warning for the default account; a
+credential passed through one of `provisioning.passthrough_env`
+(for example `ANTHROPIC_API_KEY`) also counts as signed in.
+
+Bundled profiles with accounts: `claude` (`CLAUDE_CONFIG_DIR`),
+`codex` (`CODEX_HOME`) and `grok` (`GROK_HOME`).
+
+When the daemon runs in a container, each extra directory must
+also be mounted into it (see `scripts/run-daemon.sh`).
 
 ## Local Overrides
 

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Run the host daemon directly on the host (no container). Reads
+# its settings from .env. Run as a service by ./setup.sh: the
+# LaunchAgent com.agent-dashboard.daemon on macOS, the systemd
+# user unit agent-dashboard-daemon.service on Linux.
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
+set -a && . ./.env && set +a
+
+export DASHBOARD_URL="${DASHBOARD_URL:-http://localhost:8000}"
+export PROJECTS_ROOT="${PROJECTS_ROOT:-$HOME}"
+export PROJECTS_FOLDER_DEPTH="${PROJECTS_FOLDER_DEPTH:-2}"
+export NEW_PROJECTS_DIR="${NEW_PROJECTS_DIR:-$HOME/git}"
+
+# The backend and frontend run in containers. Start them (and the
+# Podman VM on macOS); failures are ignored so the daemon still
+# comes up and retries the dashboard connection on its own.
+if [[ "${CONTAINER_RUNTIME:-}" == podman && "$(uname)" == Darwin ]]; then
+    podman machine start 2>/dev/null || true
+fi
+./scripts/compose.sh up -d >/dev/null 2>&1 || true
+
+exec uv run --python 3.12 --with-requirements agent/requirements.txt \
+    python -m agent.host_daemon

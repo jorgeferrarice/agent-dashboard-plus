@@ -12,10 +12,10 @@ from typing import Dict, List, Optional
 
 import httpx
 import socketio
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -139,6 +139,38 @@ class HostCreate(HostBase):
     host_token: str
 
 
+class ToolSetting(BaseModel):
+    """What the user chose for one AI tool on one host.
+
+    Attributes:
+        tool: Profile name the daemon reports for the tool.
+        enabled: Whether the tool is offered on the host.
+        label: Name shown on its spawn button, or None for the
+            name the tool's profile gives it.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tool: str
+    enabled: bool = True
+    label: Optional[str] = None
+
+
+class ToolSettingUpdate(BaseModel):
+    """Changes to a tool's settings on a host. Fields left
+    out keep their value.
+
+    Attributes:
+        enabled: Offer the tool on the host, or hide it and
+            refuse to start it.
+        label: New name for the spawn button. Blank restores
+            the default.
+    """
+
+    enabled: Optional[bool] = None
+    label: Optional[str] = Field(None, max_length=40)
+
+
 class HostSchema(HostBase):
     """Schema for host responses including status and metadata."""
 
@@ -149,6 +181,9 @@ class HostSchema(HostBase):
     status: str
     projects: Optional[dict] = None
     created_at: datetime
+    # Only tools the user changed; the rest are enabled and
+    # carry their default name.
+    tool_settings: List[ToolSetting] = []
 
 
 class AgentBase(BaseModel):
@@ -193,6 +228,8 @@ class SpawnRequest(BaseModel):
     tool_name: str
     project_dir: Optional[str] = None
     task_description: Optional[str] = None
+    # User-chosen name shown on the session's tab.
+    session_name: Optional[str] = Field(None, max_length=60)
     session_mode: Optional[str] = "resume"
     use_worktree: Optional[bool] = False
     cols: Optional[int] = 120
@@ -223,10 +260,14 @@ async def auth_route(request: Request):
     try:
         token = await auth.oauth.oidc.authorize_access_token(request)
         user = token.get("userinfo")
-        if user:
-            request.session["user"] = dict(user)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
+    if user and not auth.is_allowed(user):
+        raise HTTPException(
+            status_code=403, detail="This account is not allowed to sign in."
+        )
+    if user:
+        request.session["user"] = dict(user)
     return RedirectResponse(url="/")
 
 
@@ -241,6 +282,89 @@ async def logout(request: Request):
 async def me(user: dict = Depends(auth.get_current_user)):
     """Returns the currently logged-in user's profile information."""
     return user
+
+
+class OpenTabs(BaseModel):
+    """The session tabs a user has open, in display order.
+
+    Attributes:
+        tabs: Agent IDs, first tab first. ``None`` in a response
+            means the user has never saved any, which is not the
+            same as having closed them all.
+    """
+
+    tabs: Optional[List[str]] = Field(None, max_length=200)
+
+
+def _user_key(user: dict) -> str:
+    """Returns the key per-user data is stored under.
+
+    Args:
+        user: The logged-in user, as ``get_current_user`` gives it.
+
+    Returns:
+        The user's email address.
+
+    Raises:
+        HTTPException: 400 if the login carries no email.
+    """
+    email = user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Login has no email address")
+    return email
+
+
+@fastapi_app.get("/me/tabs", response_model=OpenTabs)
+def read_open_tabs(
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Returns the logged-in user's open session tabs, in order.
+
+    Args:
+        db: Database session.
+        user: The logged-in user. Requires UI login.
+
+    Returns:
+        The saved agent IDs, or ``tabs: null`` when the user has
+        never saved any.
+    """
+    row = db.get(models.UserTabs, _user_key(user))
+    return OpenTabs(tabs=None if row is None else row.tabs_json)
+
+
+@fastapi_app.put("/me/tabs", response_model=OpenTabs)
+def write_open_tabs(
+    body: OpenTabs,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Replaces the logged-in user's open session tabs.
+
+    The whole list is replaced: the last device to write wins.
+
+    Args:
+        body: The agent IDs of the open tabs, first tab first.
+        db: Database session.
+        user: The logged-in user. Requires UI login.
+
+    Returns:
+        The list as saved, without duplicates.
+
+    Raises:
+        HTTPException: 422 if an ID is longer than 200 characters.
+    """
+    tabs = list(dict.fromkeys(body.tabs or []))
+    if any(len(tab) > 200 for tab in tabs):
+        raise HTTPException(status_code=422, detail="Tab ID too long")
+    email = _user_key(user)
+    row = db.get(models.UserTabs, email)
+    if row is None:
+        row = models.UserTabs(email=email)
+        db.add(row)
+    row.tabs_json = tabs
+    db.commit()
+    return OpenTabs(tabs=tabs)
 
 
 # Protected API Endpoints
@@ -389,6 +513,101 @@ async def list_tool_models(
         "default_model": result.get("default_model"),
         "error": result.get("error"),
     }
+
+
+@fastapi_app.put(
+    "/hosts/{host_id}/tools/{tool_name}/settings",
+    response_model=List[ToolSetting],
+)
+async def update_tool_setting(
+    host_id: int,
+    tool_name: str,
+    body: ToolSettingUpdate,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Enables, disables or renames an AI tool on a host.
+
+    A disabled tool is hidden from the host's spawn buttons and
+    ``POST /agents/spawn`` refuses it. Sessions already running
+    are not touched. Every connected UI is told about the
+    change. Requires UI login.
+
+    Args:
+        host_id: ID of the host the setting applies to.
+        tool_name: Profile name of the tool, as the daemon
+            reports it. It need not be detected right now.
+        body: The fields to change.
+        db: Database session.
+        user: The logged-in user.
+
+    Returns:
+        All the tool settings saved for the host.
+
+    Raises:
+        HTTPException: 404 if the host does not exist, 422 if
+            the tool name is not a plausible profile name.
+    """
+    host = db.query(models.Host).filter(models.Host.id == host_id).first()
+    if not host:
+        raise HTTPException(status_code=404, detail="Host not found.")
+    if not re.fullmatch(r"[\w.@-]{1,100}", tool_name):
+        raise HTTPException(status_code=422, detail="Invalid tool name.")
+    try:
+        row = next((s for s in host.tool_settings if s.tool == tool_name), None)
+        if row is None:
+            row = models.HostToolSetting(tool=tool_name, enabled=True)
+            host.tool_settings.append(row)
+        if body.enabled is not None:
+            row.enabled = body.enabled
+        if body.label is not None:
+            row.label = body.label.strip() or None
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500, detail=f"Failed to save tool settings: {e}"
+        ) from e
+    settings = [ToolSetting.model_validate(s).model_dump() for s in host.tool_settings]
+    await socket.sio.emit(
+        "host_settings_update",
+        {"host_id": host_id, "tool_settings": settings},
+        namespace="/terminal",
+    )
+    return settings
+
+
+@fastapi_app.post("/hosts/{host_id}/restart")
+async def restart_host_daemon(
+    host_id: int,
+    user: dict = Depends(auth.get_current_user),
+):
+    """Asks a host daemon to restart itself.
+
+    The daemon shuts down and its supervisor (the launchd
+    KeepAlive job, or the container restart policy) starts a
+    fresh one. Every session on the host ends: the daemon
+    closes their tmux sessions as it stops.
+
+    Args:
+        host_id: ID of the host whose daemon to restart.
+
+    Returns:
+        Dict with a ``detail`` message.
+
+    Raises:
+        HTTPException: 400 if no daemon of that host is
+            connected.
+    """
+    sid = socket.host_sids.get(host_id)
+    if not sid:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot restart: Host is offline or does not exist.",
+        )
+    # Fire and forget: the daemon disconnects right away.
+    await socket.sio.emit("restart_daemon", {}, to=sid, namespace="/terminal")
+    return {"detail": "Restart requested."}
 
 
 @fastapi_app.delete("/hosts/{host_id}")
@@ -545,6 +764,16 @@ async def spawn_agent(
             status_code=400,
             detail="Cannot spawn agent: Host is offline or does not exist.",
         )
+    # Hiding the button is not enough: a tool the user turned
+    # off for this host must not start from any client.
+    if any(s.tool == request.tool_name and not s.enabled for s in host.tool_settings):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Cannot spawn agent: {request.tool_name} is disabled on "
+                f"{host.name}. Enable it in the host's Settings."
+            ),
+        )
 
     import uuid
 
@@ -559,6 +788,7 @@ async def spawn_agent(
         telemetry_json={
             "project_dir": request.project_dir,
             "task_description": request.task_description,
+            "session_name": (request.session_name or "").strip() or None,
             "use_worktree": request.use_worktree or False,
         },
     )
@@ -673,6 +903,127 @@ async def update_task_description(
     )
 
     # Broadcast updated telemetry to all UI clients
+    await socket.sio.emit(
+        "agent_telemetry_update",
+        {"agent_id": agent_id, "telemetry": tel},
+        namespace="/terminal",
+    )
+
+    return {"status": "updated"}
+
+
+# Largest file the UI may send to a session. Keep in sync with
+# MAX_UPLOAD_BYTES in agent/host_daemon.py and
+# client_max_body_size in frontend/nginx.conf.
+MAX_UPLOAD_BYTES = 90 * 1024 * 1024
+
+
+@fastapi_app.post("/agents/{agent_id}/files")
+async def upload_agent_file(
+    agent_id: str,
+    file: UploadFile,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Sends a file to the host a session runs on.
+
+    The daemon owns the filesystem, so it picks the location
+    and sanitises the name; this endpoint enforces the size
+    limit, relays the bytes and turns the daemon's answer into
+    an HTTP response. The UI then types the returned path into
+    the session's terminal.
+
+    Args:
+        agent_id: ID of the session the file is for.
+        file: The uploaded file.
+
+    Returns:
+        Dict with the absolute ``path`` of the file on the host.
+
+    Raises:
+        HTTPException: 404 if the session does not exist, 400 if
+            its host is offline or the daemon rejects the file,
+            413 if the file is too large, 504 if the daemon does
+            not answer in time.
+    """
+    db_agent = db.query(models.Agent).filter(models.Agent.agent_id == agent_id).first()
+    if not db_agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    sid = socket.host_sids.get(db_agent.host_id)
+    if not sid:
+        raise HTTPException(
+            status_code=400, detail="Cannot send the file: Host is offline."
+        )
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+    try:
+        result = await socket.sio.call(
+            "upload_file",
+            {"agent_id": agent_id, "name": file.filename, "data": data},
+            to=sid,
+            namespace="/terminal",
+            timeout=120,
+        )
+    except socketio.exceptions.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The host did not answer the file upload.",
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = (result or {}).get("error") if isinstance(result, dict) else None
+        raise HTTPException(
+            status_code=400, detail=detail or "Could not save the file."
+        )
+    return {"path": result["path"]}
+
+
+class SessionNameUpdate(BaseModel):
+    """Request body for renaming an agent session."""
+
+    # Empty or missing clears the name: the tab falls back to
+    # tool and project.
+    session_name: Optional[str] = Field(None, max_length=60)
+
+
+@fastapi_app.patch("/agents/{agent_id}/session-name")
+async def update_session_name(
+    agent_id: str,
+    body: SessionNameUpdate,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Renames a session, the name shown on its tab.
+
+    The name lives only in the backend's copy of the
+    telemetry: daemon updates are merged into it and never
+    carry the key, so no relay to the host is needed.
+
+    Args:
+        agent_id: The session to rename.
+        body: The new name; blank clears it.
+        db: Database session.
+        user: The authenticated UI user.
+
+    Returns:
+        A status dict.
+
+    Raises:
+        HTTPException: 404 when the agent does not exist.
+    """
+    db_agent = db.query(models.Agent).filter(models.Agent.agent_id == agent_id).first()
+    if not db_agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    tel = dict(db_agent.telemetry_json or {})
+    tel["session_name"] = (body.session_name or "").strip() or None
+    db_agent.telemetry_json = tel
+    db.commit()
+
+    # Every open dashboard refreshes the tab label from this.
     await socket.sio.emit(
         "agent_telemetry_update",
         {"agent_id": agent_id, "telemetry": tel},

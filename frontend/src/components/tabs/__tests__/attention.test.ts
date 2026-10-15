@@ -105,4 +105,12 @@ describe('tabLabel', () => {
     ).toBe('claude · notes');
     expect(tabLabel(agent('a', 'idle'))).toBe('claude');
   });
+
+  it('prefers the name the user gave the session', () => {
+    expect(
+      tabLabel(
+        agent('a', 'idle', { git_project: 'vibn', session_name: 'login fix' }),
+      ),
+    ).toBe('login fix');
+  });
 });

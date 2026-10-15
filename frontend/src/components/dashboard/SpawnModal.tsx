@@ -10,6 +10,37 @@ import {
 } from 'lucide-react';
 import type { Agent, Host, ToolModels } from '../../api';
 
+const RECENT_MODELS_KEY = 'agentDashboard.recentModels';
+const RECENT_MODELS_MAX = 5;
+
+/** Reads the models last spawned with `tool`, newest first. */
+function loadRecentModels(tool: string): string[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_MODELS_KEY) || '{}')?.[
+      tool
+    ];
+    return Array.isArray(list)
+      ? list.filter((m: unknown) => typeof m === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Moves `model` to the front of the tool's recent list. */
+function saveRecentModel(tool: string, model: string) {
+  try {
+    const all = JSON.parse(localStorage.getItem(RECENT_MODELS_KEY) || '{}');
+    all[tool] = [
+      model,
+      ...loadRecentModels(tool).filter((m) => m !== model),
+    ].slice(0, RECENT_MODELS_MAX);
+    localStorage.setItem(RECENT_MODELS_KEY, JSON.stringify(all));
+  } catch {
+    // localStorage may be unavailable (e.g. incognito).
+  }
+}
+
 /** Props for the SpawnModal component. */
 export interface SpawnModalProps {
   host: Host;
@@ -39,6 +70,7 @@ export interface SpawnModalProps {
     sessionMode: string,
     useWorktree: boolean,
     model?: string,
+    sessionName?: string,
   ) => void;
   /** Creates an empty project folder on the host and
    *  resolves to its absolute path. */
@@ -99,6 +131,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   const [selectedProject, setSelectedProject] = useState('');
   const [projectSearch, setProjectSearch] = useState('');
   const [task, setTask] = useState('');
+  const [sessionName, setSessionName] = useState('');
   const [resumeSession, setResumeSession] = useState(true);
   const [useWorktree, setUseWorktree] = useState(false);
   const [newName, setNewName] = useState('');
@@ -143,6 +176,12 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
     const q = modelSearch.trim().toLowerCase();
     return q ? all.filter((m) => m.toLowerCase().includes(q)) : all;
   }, [models, modelSearch]);
+  // Quick picks: recent models the host still offers.
+  const [recentModels] = useState(() => loadRecentModels(tool));
+  const recentShown = useMemo(
+    () => recentModels.filter((m) => (models || []).includes(m)),
+    [recentModels, models],
+  );
   const showResume = supportsResumeProp ?? false;
 
   // A typed folder name takes over from the list selection:
@@ -222,33 +261,37 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
       }
       setCreating(false);
     }
+    if (models && model) saveRecentModel(tool, model);
     onSpawn(
       dir,
       task,
       effectiveResume ? 'resume' : 'new',
       effectiveWorktree,
       models ? model : undefined,
+      sessionName.trim() || undefined,
     );
   };
   const canInitialize = (creatingNew || !!selectedProject) && !creating;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
-        <div className="flex justify-between items-center p-6 border-b border-slate-700 bg-slate-800/50">
-          <h3 className="text-xl font-bold text-slate-50 flex items-center gap-2">
+    <div className="app-root fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center sm:p-4">
+      {/* Full screen on phones, a centered dialog elsewhere. */}
+      <div className="bg-slate-800 sm:border border-slate-700 sm:rounded-2xl w-full h-full sm:h-auto sm:max-w-md shadow-2xl overflow-hidden flex flex-col">
+        <div className="flex justify-between items-center px-4 py-3 sm:p-6 border-b border-slate-700 bg-slate-800/50 shrink-0">
+          <h3 className="text-lg sm:text-xl font-bold text-slate-50 flex items-center gap-2 min-w-0 truncate">
             <PlusCircle size={24} className="text-accent" />
             Spawn {displayName || tool.toUpperCase()}
           </h3>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-50 transition-colors"
+            aria-label="Close"
+            className="text-slate-400 hover:text-slate-50 transition-colors p-2 -m-2"
           >
             <X size={24} />
           </button>
         </div>
 
-        <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
+        <div className="p-4 sm:p-6 space-y-5 sm:space-y-6 flex-1 min-h-0 sm:flex-none sm:max-h-[70vh] overflow-y-auto">
           <div>
             <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
               Host
@@ -265,7 +308,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               </label>
               <button
                 onClick={onRefresh}
-                className="text-[10px] text-accent font-bold uppercase tracking-tighter transition-colors flex items-center gap-1 cursor-pointer hover:text-accent-hover hover:underline"
+                className="-my-2 py-2 text-[10px] text-accent font-bold uppercase tracking-tighter transition-colors flex items-center gap-1 cursor-pointer hover:text-accent-hover hover:underline"
               >
                 <RefreshCw size={10} className="animate-spin-slow" /> Force
                 Refresh
@@ -277,7 +320,8 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 size={14}
               />
               <input
-                autoFocus
+                // A phone keyboard would cover the list.
+                autoFocus={!window.matchMedia?.('(pointer: coarse)').matches}
                 type="text"
                 value={projectSearch}
                 onChange={(e) => setProjectSearch(e.target.value)}
@@ -304,7 +348,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                     key={p}
                     type="button"
                     onClick={() => setSelectedProject(p)}
-                    className={`w-full text-left px-3 py-1.5 text-sm font-mono flex items-center gap-2 transition-colors ${
+                    className={`w-full text-left px-3 py-2.5 sm:py-1.5 text-sm font-mono flex items-center gap-2 transition-colors ${
                       selectedProject === p && !creatingNew
                         ? 'bg-accent/20 text-accent'
                         : 'text-slate-300 hover:bg-slate-800'
@@ -347,7 +391,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               placeholder="new-folder-name"
               className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm font-mono text-slate-50 focus:outline-none focus:border-accent transition-colors"
             />
-            <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+            <label className="mt-1 py-1 flex items-center gap-2 text-xs text-slate-300">
               <input
                 type="checkbox"
                 checked={gitInit}
@@ -392,7 +436,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                   type="text"
                   value={modelSearch}
                   onChange={(e) => setModelSearch(e.target.value)}
-                  placeholder="Search models and combos..."
+                  placeholder="Search models..."
                   autoComplete="off"
                   spellCheck={false}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 pl-9 pr-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
@@ -415,7 +459,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                       role="option"
                       aria-selected={model === m}
                       onClick={() => setModel(m)}
-                      className={`w-full text-left px-3 py-1.5 text-sm font-mono transition-colors ${
+                      className={`w-full text-left px-3 py-2.5 sm:py-1.5 text-sm font-mono break-all transition-colors ${
                         model === m
                           ? 'bg-accent/20 text-accent'
                           : 'text-slate-300 hover:bg-slate-800'
@@ -426,6 +470,30 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                   ))
                 )}
               </div>
+              {recentShown.length > 0 && (
+                <div
+                  role="group"
+                  aria-label="Recent models"
+                  className="mt-1.5 flex flex-wrap gap-1.5"
+                >
+                  {recentShown.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      title={m}
+                      aria-pressed={model === m}
+                      onClick={() => setModel(m)}
+                      className={`max-w-full truncate px-2 py-0.5 text-xs font-mono rounded-md border transition-colors ${
+                        model === m
+                          ? 'bg-accent/20 text-accent border-accent/40'
+                          : 'text-slate-300 border-slate-700 hover:bg-slate-700'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              )}
               <p className="text-[10px] text-slate-500 mt-1 italic">
                 {modelsLoading ? (
                   'Refreshing model list...'
@@ -467,7 +535,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 type="button"
                 onClick={() => setResumeSession(!resumeSession)}
                 disabled={sessionModeLocked}
-                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors after:absolute after:-inset-2 after:content-[''] ${
                   effectiveResume ? 'bg-accent' : 'bg-slate-600'
                 } ${sessionModeLocked ? 'cursor-not-allowed' : ''}`}
               >
@@ -504,7 +572,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               aria-label="Worktree isolation"
               onClick={() => setUseWorktree(!useWorktree)}
               disabled={!canWorktree}
-              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors after:absolute after:-inset-2 after:content-[''] ${
                 effectiveWorktree ? 'bg-accent' : 'bg-slate-600'
               } ${canWorktree ? '' : 'cursor-not-allowed'}`}
             >
@@ -520,6 +588,25 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
           </div>
 
           <div>
+            <label
+              htmlFor="session-name"
+              className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2"
+            >
+              Session Name (Optional)
+            </label>
+            <input
+              id="session-name"
+              type="text"
+              value={sessionName}
+              onChange={(e) => setSessionName(e.target.value)}
+              maxLength={60}
+              autoComplete="off"
+              placeholder="Shown on the tab instead of tool · project"
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
+            />
+          </div>
+
+          <div>
             <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
               Task Description (Optional)
             </label>
@@ -532,7 +619,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
           </div>
         </div>
 
-        <div className="p-6 bg-slate-900/50 border-t border-slate-700 flex gap-3">
+        <div className="p-4 sm:p-6 bg-slate-900/50 border-t border-slate-700 flex gap-3 shrink-0">
           <button
             onClick={onClose}
             className="flex-1 px-4 py-2.5 rounded-xl font-bold text-slate-400 hover:text-slate-50 transition-colors"

@@ -28,6 +28,27 @@ env: {}
 # ChatGPT OAuth, and local providers (Ollama,
 # LM Studio). Binary presence is sufficient.
 
+# Accounts. Every ~/.codex* directory holding a login is
+# offered as its own tool, started with CODEX_HOME pointing
+# at it (~/.codex-work becomes "codex-work").
+config_dirs:
+  env: CODEX_HOME
+  glob: "~/.codex*"
+  default: "~/.codex"
+  login_file: auth.json
+
+# Plan limits. The daemon opens Codex in an empty folder of
+# its own, types /status and reads the screen (see
+# agent/usage_probe.py). When Codex's shared background server
+# runs with other settings it asks what to do: answer "1",
+# run without it this time, which leaves the server alone.
+usage:
+  parser: codex
+  keys: /status
+  prompts:
+    - match: "Run without daemon this time"
+      keys: ["1"]
+
 # Spawn-time settings — patch config.toml to route
 # OTLP traces and logs to the daemon's receiver.
 # The {otlp_port} placeholder is expanded by the

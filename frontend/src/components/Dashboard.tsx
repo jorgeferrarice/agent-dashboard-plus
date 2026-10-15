@@ -8,13 +8,13 @@ import {
   stopAgent,
   deleteHost,
   getVersion,
+  updateToolSetting,
 } from '../api';
-import type { Host, Agent, VersionInfo } from '../api';
+import type { Host, Agent, ToolSetting, VersionInfo } from '../api';
 import { normalizeToolInfo } from '../api';
 import { Cpu, Activity } from 'lucide-react';
 import { getSocket } from '../socket';
 import LogoSvg from './LogoSvg';
-import ThemeSelector from './ThemeSelector';
 import SpawnModal from './dashboard/SpawnModal';
 import HostCard from './dashboard/HostCard';
 
@@ -75,6 +75,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
     sessionMode?: string,
     useWorktree?: boolean,
     model?: string,
+    sessionName?: string,
   ) => {
     try {
       const newAgent = await spawnAgent(
@@ -87,13 +88,22 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
         undefined,
         undefined,
         model,
+        sessionName,
       );
       setActiveSpawn(null);
       await fetchData();
       onAttach(newAgent.agent_id);
     } catch (err) {
       console.error('Failed to spawn agent:', err);
-      alert('Failed to spawn agent. Check console for details.');
+      // Say why when the server gave a reason (for example a
+      // tool that was disabled on the host from another browser).
+      const detail = (err as { response?: { data?: { detail?: unknown } } })
+        .response?.data?.detail;
+      alert(
+        typeof detail === 'string'
+          ? detail
+          : 'Failed to spawn agent. Check console for details.',
+      );
     }
   };
 
@@ -107,6 +117,21 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
     } catch (err) {
       console.error('Failed to stop agent:', err);
     }
+  };
+
+  /** Saves a tool's setting on a host and shows the result.
+   *  Rejects when it cannot be saved, for the dialog to say so. */
+  const handleToolSetting = async (
+    hostId: number,
+    tool: string,
+    change: { enabled?: boolean; label?: string },
+  ) => {
+    const toolSettings = await updateToolSetting(hostId, tool, change);
+    setHosts((prev) =>
+      prev.map((h) =>
+        h.id === hostId ? { ...h, tool_settings: toolSettings } : h,
+      ),
+    );
   };
 
   const handleDeleteHost = async (hostId: number) => {
@@ -187,10 +212,25 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       );
     };
 
+    // Another browser enabled, disabled or renamed a tool.
+    const onHostSettingsUpdate = (data: {
+      host_id: number;
+      tool_settings: ToolSetting[];
+    }) => {
+      setHosts((prev) =>
+        prev.map((h) =>
+          h.id === data.host_id
+            ? { ...h, tool_settings: data.tool_settings }
+            : h,
+        ),
+      );
+    };
+
     socket.on('connect', onConnect);
     socket.on('agent_status_update', onStatusUpdate);
     socket.on('agent_telemetry_update', onTelemetryUpdate);
     socket.on('host_telemetry_update', onHostTelemetryUpdate);
+    socket.on('host_settings_update', onHostSettingsUpdate);
     if (socket.connected) onConnect();
 
     // Poll as a safety net for missed socket events.
@@ -203,6 +243,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       socket.off('agent_status_update', onStatusUpdate);
       socket.off('agent_telemetry_update', onTelemetryUpdate);
       socket.off('host_telemetry_update', onHostTelemetryUpdate);
+      socket.off('host_settings_update', onHostSettingsUpdate);
     };
   }, []);
 
@@ -227,21 +268,21 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
     return <div className="p-8 text-slate-50">Loading dashboard...</div>;
   if (error)
     return (
-      <div className="p-8">
+      <div className="p-4 sm:p-8 max-w-md mx-auto">
         <div
           className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative"
           role="alert"
         >
           <strong className="font-bold">Error: </strong>
           <span className="block sm:inline">{error}</span>
-          <div className="mt-2">
+          <div className="mt-3">
             <a
               href={
                 import.meta.env.VITE_API_URL
                   ? `${import.meta.env.VITE_API_URL}/login`
                   : `http://${window.location.hostname}:8000/login`
               }
-              className="underline font-bold"
+              className="block text-center bg-red-700 hover:bg-red-600 text-white font-bold py-3 rounded-lg"
             >
               Login via OIDC
             </a>
@@ -251,10 +292,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
     );
 
   return (
-    <div className="max-w-7xl mx-auto p-8">
-      <header className="mb-8 flex justify-between items-center">
-        <h1 className="text-3xl font-bold flex items-center gap-3 text-slate-50">
-          <LogoSvg className="w-9 h-9" />
+    <div className="max-w-7xl mx-auto p-3 sm:p-8">
+      <header className="mb-4 sm:mb-8 flex flex-col gap-3 sm:gap-4">
+        <h1 className="text-xl sm:text-3xl font-bold flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-50 min-w-0">
+          <LogoSvg className="w-7 h-7 sm:w-9 sm:h-9" />
           Agent Dashboard
           <span className="text-xs font-normal text-slate-500 font-mono self-end mb-0.5">
             {appVersion}
@@ -290,19 +331,24 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
               )}
           </span>
         </h1>
-        <div className="flex items-center gap-4">
-          <ThemeSelector />
-          <div className="bg-slate-800 p-3 rounded-lg flex items-center gap-3">
-            <Cpu className="text-accent" />
+        <div className="grid grid-cols-2 gap-2 sm:gap-4">
+          <div className="bg-slate-800 p-2 sm:p-3 rounded-lg flex items-center gap-2 sm:gap-3">
+            <Cpu className="text-accent w-5 h-5 sm:w-6 sm:h-6" />
             <div>
-              <p className="text-xs text-slate-400">Registered Hosts</p>
+              <p className="text-[10px] sm:text-xs text-slate-400">
+                <span className="sm:hidden">Hosts</span>
+                <span className="hidden sm:inline">Registered Hosts</span>
+              </p>
               <p className="font-bold text-slate-50">{hosts.length}</p>
             </div>
           </div>
-          <div className="bg-slate-800 p-3 rounded-lg flex items-center gap-3">
-            <Activity className="text-green-400" />
+          <div className="bg-slate-800 p-2 sm:p-3 rounded-lg flex items-center gap-2 sm:gap-3">
+            <Activity className="text-green-400 w-5 h-5 sm:w-6 sm:h-6" />
             <div>
-              <p className="text-xs text-slate-400">Active Agents</p>
+              <p className="text-[10px] sm:text-xs text-slate-400">
+                <span className="sm:hidden">Agents</span>
+                <span className="hidden sm:inline">Active Agents</span>
+              </p>
               <p className="font-bold text-slate-50">{activeAgents.length}</p>
             </div>
           </div>
@@ -310,15 +356,15 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       </header>
 
       <section>
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-xl font-semibold text-slate-300">
+        <div className="flex justify-between items-center mb-3 sm:mb-6">
+          <h2 className="text-base sm:text-xl font-semibold text-slate-300">
             Registered Hosts & Active Sessions
           </h2>
-          <span className="text-xs text-slate-500 italic">
+          <span className="hidden sm:inline text-xs text-slate-500 italic">
             Live telemetry from remote daemons
           </span>
         </div>
-        <div className="space-y-6">
+        <div className="space-y-4 sm:space-y-6">
           {sortedHosts.map((host) => (
             <HostCard
               key={host.id}
@@ -328,6 +374,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
               onStop={handleStop}
               onSpawnClick={(hostId, tool) => setActiveSpawn({ hostId, tool })}
               onDeleteHost={handleDeleteHost}
+              onToolSetting={handleToolSetting}
             />
           ))}
         </div>
@@ -343,7 +390,11 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
             <SpawnModal
               host={spawnHost!}
               tool={activeSpawn.tool}
-              displayName={toolInfo?.display_name}
+              displayName={
+                spawnHost?.tool_settings?.find(
+                  (s) => s.tool === activeSpawn.tool,
+                )?.label || toolInfo?.display_name
+              }
               supportsResume={toolInfo?.supports_resume}
               models={toolInfo?.models}
               defaultModel={toolInfo?.default_model}
@@ -358,7 +409,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
                 (a) => a.host_id === activeSpawn.hostId,
               )}
               onClose={() => setActiveSpawn(null)}
-              onSpawn={(dir, task, sessionMode, useWorktree, model) =>
+              onSpawn={(dir, task, sessionMode, useWorktree, model, name) =>
                 handleSpawn(
                   activeSpawn.hostId,
                   activeSpawn.tool,
@@ -367,6 +418,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
                   sessionMode,
                   useWorktree,
                   model,
+                  name,
                 )
               }
               onRefresh={requestProjects}

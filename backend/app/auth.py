@@ -71,6 +71,33 @@ oauth.register(
 )
 
 
+def is_allowed(user) -> bool:
+    """Whether an OIDC user may use the dashboard.
+
+    ALLOWED_EMAILS is a comma-separated list of e-mail addresses.
+    When it is set, only those accounts get in: every session is
+    a shell on a host, and a generic provider such as Google
+    signs in anyone who has an account. Unset, any user the
+    provider signs in is allowed, as before.
+
+    Args:
+        user: The session's user dict (OIDC userinfo), or None.
+
+    Returns:
+        True if the user is signed in and allowed.
+    """
+    if not user:
+        return False
+    allowed = {
+        e.strip().lower()
+        for e in os.getenv("ALLOWED_EMAILS", "").split(",")
+        if e.strip()
+    }
+    if not allowed:
+        return True
+    return str(user.get("email", "")).lower() in allowed
+
+
 def get_current_user(request: Request):
     """
     Dependency to check if a user is logged in via OIDC session.
@@ -79,7 +106,7 @@ def get_current_user(request: Request):
         return {"email": "dev@example.com", "name": "Developer"}
 
     user = request.session.get("user")
-    if not user:
+    if not is_allowed(user):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
