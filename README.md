@@ -35,6 +35,9 @@ A multi-host orchestration platform for AI coding agents — spawn, monitor, and
 - **One-command install** — [`./setup.sh`](#quick-start) sets up
   the hub, registers the machine as a host and installs the daemon
   as a service on macOS and Linux (apt/dnf).
+- **Agent harness** — the setup installs add-ons (Caveman, RTK,
+  Graphify, Ponytail) and a set of skills into Claude Code, Codex
+  and Grok, picked from a menu. See [Agent harness](#agent-harness).
 
 **Sessions**
 - **Tabs instead of popups** — Sessions open as tabs next to the
@@ -104,6 +107,7 @@ git clone https://github.com/jorgeferrarice/agent-dashboard-plus.git
 cd agent-dashboard-plus
 ./setup.sh            # interactive
 ./setup.sh --dry-run  # print every step without running it
+./setup.sh --harness  # only the agent harness step (add-ons and skills)
 ./setup.sh --help
 ```
 
@@ -148,6 +152,69 @@ installing anything. It:
    - Grok: `curl -fsSL https://x.ai/cli/install.sh | bash`
 
    Sign in to each CLI you use; the daemon then offers it.
+9. **Agent harness** — add-ons and skills for every agent you run.
+   See [Agent harness](#agent-harness).
+
+### Agent harness
+
+`./setup.sh` (or `./setup.sh --harness` on its own) installs a
+default harness into the AI agents on the machine. Two menus,
+driven with the arrow keys, space to toggle and Enter to confirm
+([gum](https://github.com/charmbracelet/gum), installed if missing):
+
+1. **What to install.** Everything is selected at first; each line
+   shows a one-line summary.
+2. **Where to install it.** Every agent account found: `~/.claude`,
+   extra Claude accounts such as `~/.claude-work`, `~/.codex`,
+   `~/.grok` (and their extra accounts).
+
+Re-running keeps things in sync: selected items are installed or
+updated, and items **of this list** that are installed but no
+longer selected are removed after you confirm. Anything else you
+installed is never touched. Combinations an add-on does not support
+are skipped and listed at the end.
+
+Every selected account also gets a short instruction in its global
+instructions file (`CLAUDE.md`, or `AGENTS.md` for Codex and Grok),
+between `agent-dashboard-plus:skills` markers: check which skills
+are available, use them when they fit, and suggest them when they
+would help.
+
+**Add-ons**
+
+| Item | What it does | Agents |
+|------|--------------|--------|
+| [Caveman](https://github.com/JuliusBrussee/caveman) | Makes the agent answer tersely, keeping every technical fact and dropping filler, to save tokens. Set to `ultracave` (the most compressed mode) and active in every session (`~/.config/caveman/config.json`). | Claude Code (plugin), Codex, Grok (experimental, skills only) |
+| [RTK](https://github.com/rtk-ai/rtk) | A hook that runs shell commands through `rtk`, which condenses their output (test runs, logs, git) before the agent reads it. `rtk gain` shows the savings. | Claude Code, Codex |
+| [Graphify](https://github.com/Graphify-Labs/graphify) | Turns a codebase, its docs and schemas into a knowledge graph the agent can query instead of reading files one by one. Run `/graphify .` in a project to build it. | Claude Code, Codex |
+| [Ponytail](https://github.com/DietrichGebert/ponytail) | "Lazy senior developer" rules: reuse before writing, standard library before dependencies, the shortest diff that works. Level `full`; `/ponytail lite\|full\|ultra` changes it. | Claude Code, Codex, Grok |
+
+Codex asks you to trust new hooks once: run `/hooks` in Codex after
+installing Caveman or Ponytail.
+
+**Skills** (installed with [`npx skills`](https://github.com/vercel-labs/skills))
+
+| Skill | Source | What it does |
+|-------|--------|--------------|
+| `grill-with-docs` | [mattpocock/skills](https://github.com/mattpocock/skills) | Interviews you relentlessly about a plan or design and writes the decisions down as it goes (ADRs, a glossary). |
+| `tdd` | mattpocock/skills | Test-driven development: one failing test, the code to pass it, refactor, repeat. |
+| `handoff` | mattpocock/skills | Compacts the conversation into a handoff document another agent can pick up. |
+| `frontend-design` | [anthropics/skills](https://github.com/anthropics/skills) | Guides distinctive, intentional visual design for UI work instead of templated defaults. |
+| `diagnosing-bugs` | mattpocock/skills | A disciplined loop for hard bugs and performance regressions: reproduce, hypothesize, measure, fix. |
+| `prototype` | mattpocock/skills | Builds a throwaway prototype to answer a design question (state model, logic or UI) before committing to it. |
+| `codebase-design` | mattpocock/skills | A shared vocabulary for designing deep modules, interfaces and seams. |
+| `grilling` | mattpocock/skills | Grills you about a plan, decision or idea until it holds up. |
+| `code-review` | mattpocock/skills | Reviews changes since a commit, branch or tag against coding standards and the spec, in parallel sub-agents. |
+| `implement` | mattpocock/skills | Implements a piece of work from a spec or a set of tickets. |
+| `wayfinder` | mattpocock/skills | Plans work too big for one session as a map of decision tickets in your issue tracker, resolved one at a time. |
+| `design-taste-frontend` | [leonxlnx/taste-skill](https://github.com/leonxlnx/taste-skill) | Anti-slop art direction for landing pages and marketing sites, with a screenshot look-and-fix loop. |
+| `ui-taste` | [uizze.sh](https://uizze.sh/) | Improves the agent's UI taste for web and iOS with Uizze's playbooks and real product references. |
+| `ios-design` | uizze.sh | Designs and reviews iPhone UI in SwiftUI, UIKit or React Native against Apple's Human Interface Guidelines. |
+| `wizard` | mattpocock/skills | Generates an interactive bash wizard for steps only a human can do (credentials, dashboards, migrations). |
+
+Skills go to each agent's skills folder (`~/.claude/skills`,
+`~/.agents/skills` for Codex, `~/.grok/skills`); extra Claude and
+Grok accounts get links to the same copies.
 
 ### Security
 

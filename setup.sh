@@ -7,7 +7,9 @@
 # Safe to run again: an existing .env is kept and only missing
 # values are filled in.
 #
-# Usage: ./setup.sh [--dry-run] [--help]
+# Usage: ./setup.sh [--dry-run] [--harness] [--help]
+#   --harness  only the agent harness step (add-ons and skills for
+#              Claude Code, Codex and Grok); see README "Agent harness"
 #
 # Written for the bash 3.2 that ships with macOS.
 set -euo pipefail
@@ -534,17 +536,22 @@ install_agents() {
     info "The daemon offers every CLI it finds, one button per account."
 }
 
+# Agent harness (add-ons and skills): harness_step.
+# shellcheck source=scripts/harness.sh
+. "$ROOT/scripts/harness.sh"
+
 # ── Main ───────────────────────────────────────────────────────
 
 usage() {
-    sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
-    local arg
+    local arg harness_only=0
     for arg in "$@"; do
         case "$arg" in
         --dry-run) DRY_RUN=1 ;;
+        --harness) harness_only=1 ;;
         -h | --help)
             usage
             exit 0
@@ -556,6 +563,10 @@ main() {
     [[ $DRY_RUN == 1 ]] && say "Dry run: nothing is installed or changed"
 
     detect_platform
+    if [[ $harness_only == 1 ]]; then
+        harness_step
+        return
+    fi
     check_tools
     choose_runtime
     configure_env
@@ -564,6 +575,7 @@ main() {
     register_host
     install_daemon
     install_agents
+    harness_step
 
     say "Done"
     info "Dashboard: $(get_env VITE_API_URL)"
