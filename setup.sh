@@ -7,9 +7,14 @@
 # Safe to run again: an existing .env is kept and only missing
 # values are filled in.
 #
-# Usage: ./setup.sh [--dry-run] [--harness] [--help]
-#   --harness  only the agent harness step (add-ons and skills for
-#              Claude Code, Codex and Grok); see README "Agent harness"
+# Usage: ./setup.sh [--dry-run] [--harness] [--add-host] [--join] [--help]
+#   --harness   only the agent harness step (add-ons and skills for
+#               Claude Code, Codex and Grok); see README "Agent harness"
+#   --add-host  on the dashboard machine: register another computer
+#               and print the URL and token it needs
+#   --join      on another computer: connect it to an existing
+#               dashboard (daemon only, no containers); see README
+#               "Adding another computer"
 #
 # Written for the bash 3.2 that ships with macOS.
 set -euo pipefail
@@ -263,16 +268,21 @@ wait_for_docker() {
 
 TUNNEL_TOKEN=""
 
-configure_env() {
-    say "Writing .env"
-    default_env SECRET_KEY "$(openssl rand -hex 32)"
-    default_env HOST_TOKEN "$(openssl rand -hex 24)"
-    default_env DASHBOARD_URL "http://localhost:8000"
+# Where the daemon looks for projects and creates new ones.
+configure_projects_env() {
     default_env PROJECTS_FOLDER_DEPTH 2
     if [[ -z "$(get_env PROJECTS_ROOT)" ]]; then
         set_env PROJECTS_ROOT "$(ask "Folder to look for projects in:" "$HOME")"
     fi
     default_env NEW_PROJECTS_DIR "$HOME/git"
+}
+
+configure_env() {
+    say "Writing .env"
+    default_env SECRET_KEY "$(openssl rand -hex 32)"
+    default_env HOST_TOKEN "$(openssl rand -hex 24)"
+    default_env DASHBOARD_URL "http://localhost:8000"
+    configure_projects_env
 
     local configured=0
     if [[ "$(get_env BYPASS_AUTH)" == true || -n "$(get_env OIDC_CLIENT_ID)" ]]; then
@@ -382,17 +392,16 @@ start_containers() {
     die "The backend did not start. Check: scripts/compose.sh logs backend"
 }
 
-# Register this machine with the backend, or update its token.
-# The token goes in through stdin, never on a command line.
+# Register a host with the backend, or update its token when a host
+# with that name or token exists. $1 is the name (no spaces), $2 the
+# token. The token goes in through stdin, never on a command line.
 register_host() {
-    say "Registering this machine as a host"
-    local name
-    name="$(hostname -s 2>/dev/null || hostname)"
+    local name="$1" token="$2"
     if [[ $DRY_RUN == 1 ]]; then
-        info "[dry-run] register host '$name' with HOST_TOKEN from .env"
+        info "[dry-run] register host '$name'"
         return
     fi
-    printf '%s\n%s\n' "$name" "$(get_env HOST_TOKEN)" |
+    printf '%s\n%s\n' "$name" "$token" |
         "$ROOT/scripts/compose.sh" exec -T backend python3 -c '
 import sys
 from app import database, models
@@ -411,6 +420,51 @@ else:
 db.commit()
 print("    host registered:", host.name)
 '
+}
+
+# Hub side of adding a computer: register it under a new token and
+# print what ./setup.sh --join asks for on that computer.
+add_host_step() {
+    [[ -n "$(get_env SECRET_KEY)" ]] ||
+        die "Run --add-host on the machine that runs the dashboard (after ./setup.sh)."
+    say "Adding another computer"
+    local name token url
+    name="$(ask "Name for the new computer (e.g. work-laptop):")"
+    [[ $DRY_RUN == 1 || $name =~ ^[A-Za-z0-9._-]+$ ]] ||
+        die "Use only letters, digits, '.', '-' and '_' in the name."
+    token="$(openssl rand -hex 24)"
+    register_host "$name" "$token"
+    url="$(get_env VITE_API_URL)"
+    [[ $url == http://localhost* ]] &&
+        warn "The dashboard listens on localhost only: the new computer needs a Cloudflare Tunnel or another route to it."
+    say "On the new computer, run ./setup.sh --join and enter:"
+    info "Dashboard URL: $url"
+    [[ $DRY_RUN == 1 ]] || info "Host token:    $token"
+    info "Keep the token secret: it lets a machine act as '$name'."
+}
+
+# Computer side: point the daemon at an existing dashboard. No
+# containers run here; the hub stays on its own machine.
+join_step() {
+    [[ -z "$(get_env SECRET_KEY)" ]] ||
+        die "This machine runs the dashboard: use ./setup.sh, not --join."
+    say "Joining an existing dashboard"
+    local url token
+    url="$(ask "Dashboard URL (e.g. https://dash.example.com):" "$(get_env DASHBOARD_URL)")"
+    url="${url%/}"
+    [[ -n $url ]] || die "The dashboard URL is required."
+    [[ $url == https://* || $url == http://localhost* || $url == http://127.0.0.1* ]] ||
+        warn "$url is not https: the host token travels unencrypted."
+    token="$(ask_secret "Host token (from ./setup.sh --add-host on the dashboard machine):")"
+    token="${token:-$(get_env HOST_TOKEN)}"
+    [[ -n $token ]] || die "The host token is required."
+    if [[ $DRY_RUN == 0 ]]; then
+        curl -fsS "$url/health" >/dev/null ||
+            die "Cannot reach $url/health. Check the URL and the network."
+    fi
+    set_env DASHBOARD_URL "$url"
+    set_env HOST_TOKEN "$token"
+    configure_projects_env
 }
 
 # ── Daemon service ─────────────────────────────────────────────
@@ -547,11 +601,13 @@ usage() {
 }
 
 main() {
-    local arg harness_only=0
+    local arg mode=full
     for arg in "$@"; do
         case "$arg" in
         --dry-run) DRY_RUN=1 ;;
-        --harness) harness_only=1 ;;
+        --harness) mode=harness ;;
+        --add-host) mode=add-host ;;
+        --join) mode="join" ;;
         -h | --help)
             usage
             exit 0
@@ -563,16 +619,33 @@ main() {
     [[ $DRY_RUN == 1 ]] && say "Dry run: nothing is installed or changed"
 
     detect_platform
-    if [[ $harness_only == 1 ]]; then
+    case "$mode" in
+    harness)
         harness_step
         return
-    fi
+        ;;
+    add-host)
+        add_host_step
+        return
+        ;;
+    join)
+        check_tools
+        join_step
+        install_daemon
+        install_agents
+        harness_step
+        say "Done"
+        info "This computer appears on $(get_env DASHBOARD_URL) once the daemon connects."
+        return
+        ;;
+    esac
     check_tools
     choose_runtime
     configure_env
     configure_tunnel
     start_containers
-    register_host
+    say "Registering this machine as a host"
+    register_host "$(hostname -s 2>/dev/null || hostname)" "$(get_env HOST_TOKEN)"
     install_daemon
     install_agents
     harness_step

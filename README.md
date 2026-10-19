@@ -109,6 +109,8 @@ cd agent-dashboard-plus
 ./setup.sh --dry-run  # print every step without running it
 ./setup.sh --harness  # only the agent harness step (add-ons and skills)
 ./setup.sh --help
+./setup.sh --add-host # register another computer (run on the dashboard machine)
+./setup.sh --join     # connect this computer to an existing dashboard
 ```
 
 Supported: macOS, and Linux with `apt` or `dnf`. The script is
@@ -156,6 +158,46 @@ installing anything. It:
    See [Agent harness](#agent-harness).
 
 ### Agent harness
+### Adding another computer
+
+One dashboard can drive agents on many computers. Each extra
+computer runs only the host daemon; the dashboard (the hub) stays
+on the machine where you first ran `./setup.sh`.
+
+The new computer must reach the dashboard. The hub listens on
+`localhost` only, so use the Cloudflare Tunnel from step 7 (or
+another private route, such as Tailscale).
+
+1. **On the dashboard machine**, run:
+
+   ```bash
+   ./setup.sh --add-host
+   ```
+
+   Give the computer a name (letters, digits, `.`, `-`, `_`). The
+   script registers it with a new random token and prints the
+   dashboard URL and the token. Keep the token secret: anyone with
+   it can connect a machine as that host. Running it again with the
+   same name issues a new token and the old one stops working.
+
+2. **On the new computer**, clone the repository and run:
+
+   ```bash
+   git clone https://github.com/jorgeferrarice/agent-dashboard-plus.git
+   cd agent-dashboard-plus
+   ./setup.sh --join
+   ```
+
+   Paste the URL and the token. The script checks that
+   `<URL>/health` answers, writes `.env` (`DASHBOARD_URL`,
+   `HOST_TOKEN`, project folders), installs the daemon service
+   (same LaunchAgent or systemd unit as above), then offers the
+   agent CLIs and the agent harness. No containers run on this
+   computer.
+
+The computer appears on the dashboard once its daemon connects.
+`--join` refuses to run on the dashboard machine itself.
+
 
 `./setup.sh` (or `./setup.sh --harness` on its own) installs a
 default harness into the AI agents on the machine. Two menus,

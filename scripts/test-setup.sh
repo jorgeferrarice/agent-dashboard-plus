@@ -78,4 +78,18 @@ out="$(bash "$tmp/fresh/setup.sh" --dry-run </dev/null 2>&1)" || fail "dry run f
 [[ ! -e "$tmp/fresh/.env" ]] || fail "dry run wrote .env"
 grep -q 'redirect URI: http://localhost:8080/auth' <<<"$out" || fail "no redirect URI in: $out"
 
+# --join: a dry run asks for the URL and token and writes nothing;
+# a hub machine (SECRET_KEY in .env) refuses it. --add-host needs a hub.
+out="$(bash "$tmp/fresh/setup.sh" --join --dry-run </dev/null 2>&1)" || fail "join dry run failed: $out"
+[[ ! -e "$tmp/fresh/.env" ]] || fail "join dry run wrote .env"
+grep -q 'Host token' <<<"$out" || fail "join did not ask for the token: $out"
+! grep -q 'compose' <<<"$out" || fail "join touched containers: $out"
+! bash "$tmp/fresh/setup.sh" --add-host --dry-run </dev/null >/dev/null 2>&1 ||
+    fail "--add-host ran without a hub"
+echo SECRET_KEY=x >"$tmp/fresh/.env"
+! bash "$tmp/fresh/setup.sh" --join --dry-run </dev/null >/dev/null 2>&1 ||
+    fail "--join ran on a hub"
+out="$(bash "$tmp/fresh/setup.sh" --add-host --dry-run </dev/null 2>&1)" || fail "add-host dry run failed: $out"
+grep -q "register host" <<<"$out" || fail "add-host did not register: $out"
+
 echo "setup.sh checks passed"

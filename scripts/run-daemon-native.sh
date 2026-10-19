@@ -14,13 +14,17 @@ export PROJECTS_ROOT="${PROJECTS_ROOT:-$HOME}"
 export PROJECTS_FOLDER_DEPTH="${PROJECTS_FOLDER_DEPTH:-2}"
 export NEW_PROJECTS_DIR="${NEW_PROJECTS_DIR:-$HOME/git}"
 
-# The backend and frontend run in containers. Start them (and the
+# On the dashboard machine (CONTAINER_RUNTIME set by ./setup.sh)
+# the backend and frontend run in containers. Start them (and the
 # Podman VM on macOS); failures are ignored so the daemon still
-# comes up and retries the dashboard connection on its own.
-if [[ "${CONTAINER_RUNTIME:-}" == podman && "$(uname)" == Darwin ]]; then
-    podman machine start 2>/dev/null || true
+# comes up and retries the dashboard connection on its own. A
+# computer added with ./setup.sh --join runs no containers.
+if [[ -n "${CONTAINER_RUNTIME:-}" ]]; then
+    if [[ $CONTAINER_RUNTIME == podman && "$(uname)" == Darwin ]]; then
+        podman machine start 2>/dev/null || true
+    fi
+    ./scripts/compose.sh up -d >/dev/null 2>&1 || true
 fi
-./scripts/compose.sh up -d >/dev/null 2>&1 || true
 
 exec uv run --python 3.12 --with-requirements agent/requirements.txt \
     python -m agent.host_daemon
