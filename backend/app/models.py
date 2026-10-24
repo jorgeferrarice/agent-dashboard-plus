@@ -67,6 +67,10 @@ class HostToolSetting(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     # Name shown on the spawn button; None for the default.
     label = Column(String, nullable=True)
+    # Command lines that start the tool, replacing its
+    # profile's; None for the profile's own.
+    command_new = Column(String, nullable=True)
+    command_resume = Column(String, nullable=True)
 
     host = relationship("Host", back_populates="tool_settings")
 
@@ -131,3 +135,101 @@ class Log(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     agent = relationship("Agent", back_populates="logs")
+
+
+class LocalTask(Base):
+    """
+    A task kept in the dashboard itself, as opposed to one read
+    from Jira, Shortcut or Huly.
+
+    Each task belongs to one UI user, keyed by the email of the
+    OIDC login like ``UserTabs``; nobody else sees it.
+    """
+
+    __tablename__ = "local_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_email = Column(String, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    # Board column: todo, in_progress, review or done.
+    column = Column(String, nullable=False, default="todo")
+    # low, medium, high or urgent; None when not set.
+    priority = Column(String, nullable=True)
+    # ISO date (YYYY-MM-DD); None when there is no deadline.
+    due_date = Column(String, nullable=True)
+    tags_json = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TaskConnection(Base):
+    """
+    One account of an external tracker (Jira, Shortcut, Huly)
+    that a UI user connected to the Tasks tab.
+
+    A user can have several, each with a name of their own
+    (e.g. "Jira work" and "Jira side project"). The token is
+    stored encrypted (see ``secretbox``) and never sent back to
+    the browser.
+    """
+
+    __tablename__ = "task_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_email = Column(String, nullable=False, index=True)
+    # jira, shortcut or huly.
+    provider = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    # Settings that are not secret, e.g. the site URL and email.
+    config_json = Column(JSON, nullable=False, default=dict)
+    # The token, encrypted with secretbox.
+    secret_enc = Column(Text, nullable=False)
+    # Which tasks to show (see the Tasks docs, "Filters").
+    filters_json = Column(JSON, nullable=False, default=dict)
+    # Board column chosen by the user per status name.
+    mapping_json = Column(JSON, nullable=False, default=dict)
+    last_sync_at = Column(DateTime, nullable=True)
+    # Why the last sync failed; None when it worked.
+    last_error = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    cache = relationship(
+        "TaskCache",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class TaskCache(Base):
+    """
+    The tasks last read from a connection, so the board shows
+    them at once instead of waiting for every tracker.
+    """
+
+    __tablename__ = "task_cache"
+
+    connection_id = Column(Integer, ForeignKey("task_connections.id"), primary_key=True)
+    # List of TaskItem dicts, as the board shows them.
+    items_json = Column(JSON, nullable=False, default=list)
+    synced_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    connection = relationship("TaskConnection", back_populates="cache")
+
+
+class UserPrefs(Base):
+    """
+    Preferences of one UI user that follow them across devices,
+    keyed by the email of the OIDC login like ``UserTabs``.
+    """
+
+    __tablename__ = "user_prefs"
+
+    email = Column(String, primary_key=True)
+    # Interface language: "pt-BR" or "en".
+    language = Column(String, nullable=True)

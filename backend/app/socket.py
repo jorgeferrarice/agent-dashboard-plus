@@ -60,6 +60,21 @@ def _validate_session_cookie(environ):
         return None
 
 
+def user_room(email: str) -> str:
+    """The Socket.IO room of one UI user's open pages."""
+    return f"user:{email.lower()}"
+
+
+async def notify_tasks_changed(email: str) -> None:
+    """Tells a user's open pages that their task board changed,
+    so the Tasks tab reloads it.
+
+    Args:
+        email: The user's login email.
+    """
+    await sio.emit("tasks_updated", {}, room=user_room(email), namespace="/terminal")
+
+
 @sio.on("connect", namespace="/terminal")
 async def connect(sid, environ, auth):
     """
@@ -80,10 +95,15 @@ async def connect(sid, environ, auth):
     if not host_token:
         # UI client — enforce auth unless bypassed
         bypass = os.getenv("BYPASS_AUTH", "false").lower() == "true"
+        email = "dev@example.com"
         if not bypass:
             session = _validate_session_cookie(environ)
             if not session or not is_allowed(session.get("user")):
                 return False
+            email = (session.get("user") or {}).get("email") or ""
+        # A room per UI user, for news meant for their pages only.
+        if email:
+            await sio.enter_room(sid, user_room(email), namespace="/terminal")
         return True
 
     db = next(database.get_db())

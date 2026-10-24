@@ -112,3 +112,41 @@ def get_current_user(request: Request):
             detail="Not authenticated",
         )
     return user
+
+
+def user_email(user: dict) -> str:
+    """Returns the key per-user data is stored under.
+
+    There is no users table: per-user rows are keyed by the
+    email of the OIDC login.
+
+    Args:
+        user: The logged-in user, as ``get_current_user`` gives it.
+
+    Returns:
+        The user's email address, lowercased.
+
+    Raises:
+        HTTPException: 400 if the login carries no email, 403 if
+            the identity provider did not verify it.
+    """
+    email = str(user.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Login has no email address")
+    # The email is who owns the data: an address the identity
+    # provider says it did not verify must not claim it.
+    if user.get("email_verified") is False:
+        raise HTTPException(status_code=403, detail="Email address is not verified")
+    return email
+
+
+def current_email(user: dict = Depends(get_current_user)) -> str:
+    """FastAPI dependency: the logged-in user's email.
+
+    Args:
+        user: The logged-in user. Requires UI login.
+
+    Returns:
+        The user's email address.
+    """
+    return user_email(user)

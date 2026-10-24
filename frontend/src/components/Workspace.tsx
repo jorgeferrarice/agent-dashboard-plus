@@ -12,6 +12,7 @@ import {
   BellOff,
   Columns2,
   LayoutDashboard,
+  ListTodo,
   Rows2,
   Settings,
   X,
@@ -21,7 +22,11 @@ import type { Agent } from '../api';
 import { getSocket } from '../socket';
 import Dashboard from './Dashboard';
 import Terminal from './Terminal';
+import TasksView from './tasks/TasksView';
+import ErrorBoundary from './ErrorBoundary';
 import ThemeSelector from './ThemeSelector';
+import LanguageSelector from './LanguageSelector';
+import { useI18n } from '../i18n';
 import { openTerminalWindow } from './terminalWindow';
 import {
   ATTENTION_LABELS,
@@ -33,6 +38,13 @@ import type { Attention, AttentionEvent } from './tabs/attention';
 
 /** ID of the fixed first tab. */
 const DASHBOARD = 'dashboard';
+/** ID of the Tasks tab. It sits among the session tabs (it can
+ *  be moved, closed and reopened like them) but shows the task
+ *  board instead of a terminal. */
+export const TASKS = 'tasks';
+/** Label for a tab the workspace knows only by ID. The Tasks
+ *  tab's label is translated where it is shown. */
+const defaultLabel = (id: string) => (id === TASKS ? 'Tasks' : 'session');
 const STORAGE_KEY = 'agentDashboard.tabs';
 const BASE_TITLE = 'Agent Dashboard';
 
@@ -177,6 +189,7 @@ const TabNameInput: React.FC<{
   onSave: (name: string) => void;
   onCancel: () => void;
 }> = ({ initial, onSave, onCancel }) => {
+  const { t } = useI18n();
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLInputElement>(null);
   // Set once saved or cancelled, so the blur that follows
@@ -200,8 +213,8 @@ const TabNameInput: React.FC<{
       ref={ref}
       value={value}
       maxLength={60}
-      aria-label="Session name"
-      placeholder="Name (blank for default)"
+      aria-label={t('tabs.sessionName')}
+      placeholder={t('tabs.sessionNamePlaceholder')}
       enterKeyHint="done"
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
@@ -227,6 +240,7 @@ const TabNameInput: React.FC<{
  * Socket.IO connection.
  */
 const Workspace: React.FC = () => {
+  const { t } = useI18n();
   const socket = useMemo(() => getSocket(), []);
   const [stored] = useState(loadStoredTabs);
   const [tabs, setTabs] = useState<SessionTab[]>(stored.tabs);
@@ -298,7 +312,7 @@ const Workspace: React.FC = () => {
       setTabs((prev) =>
         prev.some((t) => t.id === id)
           ? prev
-          : [...prev, { id, label: 'session' }],
+          : [...prev, { id, label: defaultLabel(id) }],
       );
       activate(id);
     },
@@ -373,10 +387,10 @@ const Workspace: React.FC = () => {
       if (pageInFocus()) return;
       for (const event of events) {
         const label =
-          tabsRef.current.find((t) => t.id === event.agentId)?.label ||
-          'Session';
+          tabsRef.current.find((tab) => tab.id === event.agentId)?.label ||
+          t('tabs.sessionFallback');
         const options = {
-          body: ATTENTION_LABELS[event.kind],
+          body: t(ATTENTION_LABELS[event.kind]),
           icon: '/icons/icon-192.png',
           // One notification per session: a newer state
           // replaces the older one.
@@ -398,7 +412,7 @@ const Workspace: React.FC = () => {
         };
       }
     },
-    [openTab],
+    [openTab, t],
   );
   // Clicks on service worker notifications.
   useEffect(() => {
@@ -444,7 +458,11 @@ const Workspace: React.FC = () => {
     const current = tabs;
     const next = current
       .filter(
-        (t) => byId.has(t.id) || ended.has(t.id) || !knownRef.current.has(t.id),
+        (t) =>
+          t.id === TASKS ||
+          byId.has(t.id) ||
+          ended.has(t.id) ||
+          !knownRef.current.has(t.id),
       )
       .map((t) => {
         const agent = byId.get(t.id);
@@ -507,7 +525,9 @@ const Workspace: React.FC = () => {
         if (ids) {
           setTabs((prev) => {
             const known = new Map(prev.map((t) => [t.id, t]));
-            return ids.map((id) => known.get(id) ?? { id, label: 'session' });
+            return ids.map(
+              (id) => known.get(id) ?? { id, label: defaultLabel(id) },
+            );
           });
         }
         // Never saved before: the tabs of this browser become
@@ -652,14 +672,14 @@ const Workspace: React.FC = () => {
       <div className="flex items-stretch bg-slate-950 border-b border-slate-700 shrink-0">
         <div
           role="tablist"
-          aria-label="Sessions"
+          aria-label={t('tabs.sessions')}
           className="flex items-stretch flex-1 min-w-0 overflow-x-auto"
         >
           <button
             role="tab"
             aria-selected={active === DASHBOARD}
             onClick={() => activate(DASHBOARD)}
-            title="Dashboard (Alt+1)"
+            title={t('tabs.dashboardShortcut')}
             className={`flex items-center gap-2 px-3 pointer-fine:px-4 py-3.5 pointer-fine:py-2 text-xs font-semibold border-r border-slate-800 shrink-0 transition-colors ${
               active === DASHBOARD
                 ? 'bg-slate-800 text-slate-50'
@@ -667,11 +687,12 @@ const Workspace: React.FC = () => {
             }`}
           >
             <LayoutDashboard size={14} />
-            <span className="hidden sm:inline">Dashboard</span>
+            <span className="hidden sm:inline">{t('tabs.dashboard')}</span>
           </button>
           {tabs.map((tab, i) => {
             const attention = tabAttention(tab.id);
             const isEnded = ended.has(tab.id);
+            const label = tab.id === TASKS ? t('tabs.tasks') : tab.label;
             const selected = active === tab.id;
             return (
               <div
@@ -703,6 +724,8 @@ const Workspace: React.FC = () => {
                   setDropTarget(null);
                 }}
                 onContextMenu={(e) => {
+                  // The Tasks tab has nothing to rename.
+                  if (tab.id === TASKS) return;
                   e.preventDefault();
                   setMenuFor(tab.id);
                   showPopoverAt('tab-menu', e.clientX, e.clientY);
@@ -736,30 +759,39 @@ const Workspace: React.FC = () => {
                     aria-selected={selected}
                     onClick={() => activate(tab.id)}
                     title={
-                      (attention ? `${ATTENTION_LABELS[attention]} — ` : '') +
-                      tab.label +
-                      (i < 8 ? ` (Alt+${i + 2})` : '')
+                      (attention
+                        ? `${t(ATTENTION_LABELS[attention])} — `
+                        : '') +
+                      label +
+                      (i < 8 ? ` ${t('tabs.shortcut', { n: i + 2 })}` : '')
                     }
                     className="flex items-center gap-2 pl-3 pointer-fine:pl-4 pr-1 pointer-fine:pr-2 py-3.5 pointer-fine:py-2 text-xs font-mono max-w-40 md:max-w-56"
                   >
+                    {tab.id === TASKS && (
+                      <ListTodo size={14} className="shrink-0" />
+                    )}
                     {attention && (
                       <span
                         role="status"
-                        aria-label={ATTENTION_LABELS[attention]}
+                        aria-label={t(ATTENTION_LABELS[attention])}
                         className={`h-2 w-2 rounded-full shrink-0 ${ATTENTION_DOT[attention]}`}
                       />
                     )}
                     <span
-                      className={`truncate ${isEnded ? 'line-through opacity-60' : ''}`}
+                      className={`truncate ${isEnded ? 'line-through opacity-60' : ''} ${tab.id === TASKS ? 'font-sans font-semibold' : ''}`}
                     >
-                      {tab.label}
+                      {label}
                     </span>
                   </button>
                 )}
                 <button
                   onClick={() => closeTab(tab.id)}
-                  aria-label={`Close tab ${tab.label}`}
-                  title="Close tab (the session keeps running)"
+                  aria-label={t('tabs.close', { label })}
+                  title={
+                    tab.id === TASKS
+                      ? t('tabs.closeTitle')
+                      : t('tabs.closeSessionTitle')
+                  }
                   // Full tab height on touch screens.
                   className="self-stretch px-2.5 pointer-fine:self-center pointer-fine:p-1 pointer-fine:mr-2 rounded text-slate-500 hover:text-slate-50 hover:bg-slate-700"
                 >
@@ -773,7 +805,7 @@ const Workspace: React.FC = () => {
           id="tab-menu"
           popover="auto"
           role="menu"
-          aria-label="Tab actions"
+          aria-label={t('tabs.actions')}
           className="fixed inset-auto m-0 min-w-36 rounded-lg border border-slate-700 bg-slate-800 py-1 text-xs text-slate-200 shadow-xl"
         >
           <button
@@ -781,7 +813,7 @@ const Workspace: React.FC = () => {
             onClick={() => menuFor && startRename(menuFor, 'tab-menu')}
             className="block w-full px-3 py-1.5 text-left hover:bg-slate-700"
           >
-            Rename session
+            {t('settings.renameSession')}
           </button>
         </div>
         {/* Splitting a phone screen leaves two unusable panes. */}
@@ -789,10 +821,10 @@ const Workspace: React.FC = () => {
           (['row', 'col'] as const).map((dir) => {
             const on = split?.dir === dir;
             const label = on
-              ? 'Close split'
+              ? t('tabs.splitClose')
               : dir === 'row'
-                ? 'Split side by side'
-                : 'Split top and bottom';
+                ? t('tabs.splitRow')
+                : t('tabs.splitCol');
             return (
               <button
                 key={dir}
@@ -800,9 +832,7 @@ const Workspace: React.FC = () => {
                 disabled={!canSplit}
                 aria-label={label}
                 aria-pressed={on}
-                title={
-                  canSplit ? label : 'Open two session tabs to split the view'
-                }
+                title={canSplit ? label : t('tabs.splitNeedsTwo')}
                 className={`px-3 shrink-0 border-l border-slate-800 ${
                   on
                     ? 'text-accent'
@@ -821,17 +851,17 @@ const Workspace: React.FC = () => {
             disabled={notifyPermission !== 'default'}
             aria-label={
               notifyPermission === 'granted'
-                ? 'Notifications are on'
+                ? t('tabs.notifyOn')
                 : notifyPermission === 'denied'
-                  ? 'Notifications are blocked in the browser settings'
-                  : 'Turn on notifications'
+                  ? t('tabs.notifyBlocked')
+                  : t('tabs.notifyTurnOn')
             }
             title={
               notifyPermission === 'granted'
-                ? 'Notifications are on: sessions that need attention notify you while this page is in the background'
+                ? t('tabs.notifyOnTitle')
                 : notifyPermission === 'denied'
-                  ? 'Notifications are blocked in the browser settings for this site'
-                  : 'Notify me when a session needs attention'
+                  ? t('tabs.notifyBlockedTitle')
+                  : t('tabs.notifyTurnOnTitle')
             }
             className={`px-3 shrink-0 border-l border-slate-800 ${
               notifyPermission === 'granted'
@@ -858,8 +888,8 @@ const Workspace: React.FC = () => {
             pop.style.top = `${r.bottom + 4}px`;
             pop.style.right = `${window.innerWidth - r.right + 4}px`;
           }}
-          aria-label="Settings"
-          title="Settings"
+          aria-label={t('settings.title')}
+          title={t('settings.title')}
           className="px-3 shrink-0 border-l border-slate-800 text-slate-400 hover:text-slate-50"
         >
           <Settings size={14} />
@@ -870,19 +900,23 @@ const Workspace: React.FC = () => {
           className="fixed inset-auto m-0 rounded-xl border border-slate-700 bg-slate-800 p-4 text-slate-200 shadow-xl"
         >
           <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Theme
+            {t('settings.theme')}
           </p>
           <ThemeSelector />
-          {activeTab && (
+          <p className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            {t('settings.language')}
+          </p>
+          <LanguageSelector />
+          {activeTab && activeTab.id !== TASKS && (
             <>
               <p className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Session
+                {t('settings.session')}
               </p>
               <button
                 onClick={() => startRename(activeTab.id, 'workspace-settings')}
                 className="w-full rounded-lg border border-slate-700 px-3 py-1.5 text-left text-xs hover:bg-slate-700"
               >
-                Rename session
+                {t('settings.renameSession')}
               </button>
             </>
           )}
@@ -897,7 +931,13 @@ const Workspace: React.FC = () => {
           active === DASHBOARD ? 'flex-1 min-h-0 overflow-y-auto' : 'hidden'
         }
       >
-        <Dashboard onAttach={openTab} onAgentsChange={handleAgentsChange} />
+        <ErrorBoundary where="Dashboard tab">
+          <Dashboard
+            onAttach={openTab}
+            onAgentsChange={handleAgentsChange}
+            onOpenTasks={() => openTab(TASKS)}
+          />
+        </ErrorBoundary>
       </div>
 
       {panes.length > 0 && (
@@ -910,7 +950,7 @@ const Workspace: React.FC = () => {
             <div
               key={pane.id}
               role="tabpanel"
-              aria-label={pane.label}
+              aria-label={pane.id === TASKS ? t('tabs.tasks') : pane.label}
               // Clicking or typing in a pane makes it the one
               // tab clicks land in.
               onMouseDownCapture={() => activate(pane.id)}
@@ -923,15 +963,25 @@ const Workspace: React.FC = () => {
                     : 'border border-slate-800'
               }`}
             >
-              <Terminal
-                agentId={pane.id}
-                socket={socket}
-                ended={ended.has(pane.id)}
-                onClose={() => closeTab(pane.id)}
-                onOpenAgent={openTab}
-                onReplace={(newId) => replaceTab(pane.id, newId)}
-                onDetach={() => detachTab(pane.id)}
-              />
+              <ErrorBoundary
+                where={
+                  pane.id === TASKS ? 'Tasks tab' : `Session tab ${pane.id}`
+                }
+              >
+                {pane.id === TASKS ? (
+                  <TasksView />
+                ) : (
+                  <Terminal
+                    agentId={pane.id}
+                    socket={socket}
+                    ended={ended.has(pane.id)}
+                    onClose={() => closeTab(pane.id)}
+                    onOpenAgent={openTab}
+                    onReplace={(newId) => replaceTab(pane.id, newId)}
+                    onDetach={() => detachTab(pane.id)}
+                  />
+                )}
+              </ErrorBoundary>
             </div>
           ))}
         </div>

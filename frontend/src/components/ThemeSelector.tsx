@@ -11,11 +11,13 @@ import React from 'react';
 import { THEMES } from '../theme/themeValues';
 import type { ThemeKey } from '../theme/themeValues';
 import { useTheme } from '../theme/ThemeContext';
+import { useI18n } from '../i18n';
 
 const THEME_KEYS = Object.keys(THEMES) as ThemeKey[];
 
 const ThemeSelector: React.FC = () => {
   const { theme, setTheme } = useTheme();
+  const { t } = useI18n();
 
   return (
     <div className="flex items-center gap-3 sm:gap-2">
@@ -29,7 +31,7 @@ const ThemeSelector: React.FC = () => {
             key={key}
             type="button"
             title={def.label}
-            aria-label={`Switch to ${def.label} theme`}
+            aria-label={t('theme.switchTo', { name: def.label })}
             onClick={() => setTheme(key)}
             className={[
               'w-5 h-5 pointer-fine:w-4 pointer-fine:h-4 rounded-full transition-all',

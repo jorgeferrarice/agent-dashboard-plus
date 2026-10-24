@@ -7,6 +7,7 @@ operations for hosts, agents, and telemetry.
 import asyncio
 import os
 import re
+import secrets as secrets_module
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -14,16 +15,45 @@ import httpx
 import socketio
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func
+from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import models, database, auth, socket
+from . import models, database, auth, socket, tasks, secretbox, task_connections
 
 # Initialize the database
 models.Base.metadata.create_all(bind=database.engine)
+
+
+def _add_missing_columns() -> None:
+    """Adds columns that are newer than an existing database.
+
+    ``create_all`` only creates missing tables, so columns
+    added to a table later are added here. Every such column is
+    nullable, so old rows stay valid.
+    """
+    # ponytail: hand-rolled ALTER; move to Alembic once
+    # migrations need more than added nullable columns.
+    added = {"host_tool_settings": ["command_new", "command_resume"]}
+    try:
+        inspector = inspect(database.engine)
+        with database.engine.begin() as conn:
+            for table, columns in added.items():
+                have = {c["name"] for c in inspector.get_columns(table)}
+                for column in columns:
+                    if column not in have:
+                        conn.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN {column} VARCHAR")
+                        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"Could not add new database columns: {e}")
+
+
+_add_missing_columns()
 
 # --- Version tracking ---
 # Read embedded version from /app/VERSION (written at build
@@ -81,9 +111,7 @@ fastapi_app = FastAPI(title="AI Coding Agent Dashboard API")
 _bypass_auth = os.getenv("BYPASS_AUTH", "false").lower() == "true"
 _secret_key = os.getenv("SECRET_KEY", "")
 if not _secret_key and not _bypass_auth:
-    import secrets as _secrets
-
-    _secret_key = _secrets.token_hex(32)
+    _secret_key = secrets_module.token_hex(32)
     print(
         "WARNING: SECRET_KEY not set — generated an ephemeral key. "
         "Sessions will not survive restarts. Set SECRET_KEY in the "
@@ -93,6 +121,14 @@ elif not _secret_key:
     _secret_key = "bypass-auth-placeholder"
 
 fastapi_app.add_middleware(SessionMiddleware, secret_key=_secret_key)
+# Third-party tokens of the Tasks tab are encrypted with a key
+# derived from the same secret.
+# Without a SECRET_KEY of its own (BYPASS_AUTH), the placeholder
+# above is public, so a random key is used: tokens are then lost
+# at every restart, as documented.
+secretbox.configure(
+    _secret_key if os.getenv("SECRET_KEY") else secrets_module.token_hex(32)
+)
 
 # Add CORS Middleware
 # In lab environments (BYPASS_AUTH=true), we allow any HTTP/HTTPS origin.
@@ -122,7 +158,22 @@ else:
         allow_headers=["*"],
     )
 
+
 # Mount Socket.IO
+@fastapi_app.exception_handler(RequestValidationError)
+async def validation_error(_request: Request, exc: RequestValidationError):
+    """Answers invalid requests like FastAPI does, but without
+    echoing the values sent: they may hold a tracker token."""
+    errors = [
+        {k: v for k, v in error.items() if k not in ("input", "ctx")}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
+
+fastapi_app.include_router(task_connections.router)
+fastapi_app.include_router(tasks.router)
+
 app = socketio.ASGIApp(socket.sio, fastapi_app)
 
 
@@ -147,6 +198,10 @@ class ToolSetting(BaseModel):
         enabled: Whether the tool is offered on the host.
         label: Name shown on its spawn button, or None for the
             name the tool's profile gives it.
+        command_new: Command line that starts a new session,
+            or None for the profile's.
+        command_resume: Command line that resumes the last
+            session, or None for the profile's.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -154,6 +209,8 @@ class ToolSetting(BaseModel):
     tool: str
     enabled: bool = True
     label: Optional[str] = None
+    command_new: Optional[str] = None
+    command_resume: Optional[str] = None
 
 
 class ToolSettingUpdate(BaseModel):
@@ -165,10 +222,16 @@ class ToolSettingUpdate(BaseModel):
             refuse to start it.
         label: New name for the spawn button. Blank restores
             the default.
+        command_new: Command line for new sessions, quoted as
+            in a shell. Blank restores the profile's.
+        command_resume: Command line for resumed sessions.
+            Blank restores the profile's.
     """
 
     enabled: Optional[bool] = None
     label: Optional[str] = Field(None, max_length=40)
+    command_new: Optional[str] = Field(None, max_length=2000)
+    command_resume: Optional[str] = Field(None, max_length=2000)
 
 
 class HostSchema(HostBase):
@@ -296,22 +359,8 @@ class OpenTabs(BaseModel):
     tabs: Optional[List[str]] = Field(None, max_length=200)
 
 
-def _user_key(user: dict) -> str:
-    """Returns the key per-user data is stored under.
-
-    Args:
-        user: The logged-in user, as ``get_current_user`` gives it.
-
-    Returns:
-        The user's email address.
-
-    Raises:
-        HTTPException: 400 if the login carries no email.
-    """
-    email = user.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="Login has no email address")
-    return email
+# Kept as a name of its own: many endpoints below use it.
+_user_key = auth.user_email
 
 
 @fastapi_app.get("/me/tabs", response_model=OpenTabs)
@@ -365,6 +414,58 @@ def write_open_tabs(
     row.tabs_json = tabs
     db.commit()
     return OpenTabs(tabs=tabs)
+
+
+LANGUAGES = ("pt-BR", "en")
+
+
+class Preferences(BaseModel):
+    """Preferences that follow the user across devices.
+
+    Attributes:
+        language: Interface language, ``pt-BR`` or ``en``; None
+            until the user picks one.
+    """
+
+    language: Optional[str] = None
+
+
+@fastapi_app.get("/me/preferences", response_model=Preferences)
+def read_preferences(
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Returns the logged-in user's preferences.
+
+    Args:
+        db: Database session.
+        user: The logged-in user. Requires UI login.
+    """
+    row = db.get(models.UserPrefs, _user_key(user))
+    return Preferences(language=row.language if row else None)
+
+
+@fastapi_app.put("/me/preferences", response_model=Preferences)
+def write_preferences(
+    body: Preferences,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """Saves the logged-in user's preferences.
+
+    Raises:
+        HTTPException: 422 for a language the UI does not have.
+    """
+    if body.language is not None and body.language not in LANGUAGES:
+        raise HTTPException(status_code=422, detail="Unknown language")
+    email = _user_key(user)
+    row = db.get(models.UserPrefs, email)
+    if row is None:
+        row = models.UserPrefs(email=email)
+        db.add(row)
+    row.language = body.language
+    db.commit()
+    return Preferences(language=row.language)
 
 
 # Protected API Endpoints
@@ -526,7 +627,8 @@ async def update_tool_setting(
     db: Session = Depends(database.get_db),
     user: dict = Depends(auth.get_current_user),
 ):
-    """Enables, disables or renames an AI tool on a host.
+    """Enables, disables, renames or sets the command lines of an
+    AI tool on a host.
 
     A disabled tool is hidden from the host's spawn buttons and
     ``POST /agents/spawn`` refuses it. Sessions already running
@@ -562,6 +664,10 @@ async def update_tool_setting(
             row.enabled = body.enabled
         if body.label is not None:
             row.label = body.label.strip() or None
+        if body.command_new is not None:
+            row.command_new = body.command_new.strip() or None
+        if body.command_resume is not None:
+            row.command_resume = body.command_resume.strip() or None
         db.commit()
     except Exception as e:
         db.rollback()
@@ -766,7 +872,8 @@ async def spawn_agent(
         )
     # Hiding the button is not enough: a tool the user turned
     # off for this host must not start from any client.
-    if any(s.tool == request.tool_name and not s.enabled for s in host.tool_settings):
+    setting = next((s for s in host.tool_settings if s.tool == request.tool_name), None)
+    if setting and not setting.enabled:
         raise HTTPException(
             status_code=403,
             detail=(
@@ -810,6 +917,11 @@ async def spawn_agent(
             "cols": request.cols or 120,
             "rows": request.rows or 40,
             "model": request.model,
+            # Command lines set in the host's Settings.
+            "commands": {
+                "new": setting.command_new if setting else None,
+                "resume": setting.command_resume if setting else None,
+            },
         },
         room=f"host_{request.host_id}",
         namespace="/terminal",
@@ -1101,7 +1213,15 @@ async def _check_latest_release():
         await asyncio.sleep(_VERSION_CHECK_INTERVAL)
 
 
+_background_tasks: set = set()
+
+
 @fastapi_app.on_event("startup")
 async def start_version_checker():
-    """Launches the background GitHub release checker."""
+    """Launches the background GitHub release checker and the
+    poller that keeps the Tasks tab's tracker tasks fresh."""
     asyncio.create_task(_check_latest_release())
+    # Keep a reference: the event loop holds tasks only weakly.
+    _background_tasks.add(
+        asyncio.create_task(tasks.poll_forever(socket.notify_tasks_changed))
+    )

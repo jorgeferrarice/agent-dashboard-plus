@@ -9,6 +9,7 @@ import {
   Search,
 } from 'lucide-react';
 import type { Agent, Host, ToolModels } from '../../api';
+import { useI18n } from '../../i18n';
 
 const RECENT_MODELS_KEY = 'agentDashboard.recentModels';
 const RECENT_MODELS_MAX = 5;
@@ -101,6 +102,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
   onCreateProject,
   onRefresh,
 }) => {
+  const { t } = useI18n();
   // The host has not reported yet until `projects` exists;
   // after that an empty list means the scan found nothing.
   const projectsLoaded = host.projects != null;
@@ -157,7 +159,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
         setModelsError(live.error || undefined);
       })
       .catch(() => {
-        if (!cancelled) setModelsError('Could not refresh the model list.');
+        if (!cancelled) setModelsError(t('spawn.modelsRefreshFailed'));
       })
       .finally(() => {
         if (!cancelled) setModelsLoading(false);
@@ -254,7 +256,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
         const detail = (err as { response?: { data?: { detail?: unknown } } })
           ?.response?.data?.detail;
         setCreateError(
-          typeof detail === 'string' ? detail : 'Could not create the folder.',
+          typeof detail === 'string' ? detail : t('spawn.createFailed'),
         );
         setCreating(false);
         return;
@@ -280,11 +282,11 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
         <div className="flex justify-between items-center px-4 py-3 sm:p-6 border-b border-slate-700 bg-slate-800/50 shrink-0">
           <h3 className="text-lg sm:text-xl font-bold text-slate-50 flex items-center gap-2 min-w-0 truncate">
             <PlusCircle size={24} className="text-accent" />
-            Spawn {displayName || tool.toUpperCase()}
+            {t('spawn.title', { tool: displayName || tool.toUpperCase() })}
           </h3>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label={t('spawn.close')}
             className="text-slate-400 hover:text-slate-50 transition-colors p-2 -m-2"
           >
             <X size={24} />
@@ -294,7 +296,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
         <div className="p-4 sm:p-6 space-y-5 sm:space-y-6 flex-1 min-h-0 sm:flex-none sm:max-h-[70vh] overflow-y-auto">
           <div>
             <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-              Host
+              {t('spawn.host')}
             </label>
             <p className="text-slate-50 font-medium bg-slate-900/50 p-3 rounded-lg border border-slate-700">
               {host.name}
@@ -304,14 +306,14 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
           <div>
             <div className="flex justify-between items-center mb-2">
               <label className="block text-xs font-bold uppercase tracking-widest text-accent">
-                Select Project
+                {t('spawn.selectProject')}
               </label>
               <button
                 onClick={onRefresh}
                 className="-my-2 py-2 text-[10px] text-accent font-bold uppercase tracking-tighter transition-colors flex items-center gap-1 cursor-pointer hover:text-accent-hover hover:underline"
               >
-                <RefreshCw size={10} className="animate-spin-slow" /> Force
-                Refresh
+                <RefreshCw size={10} className="animate-spin-slow" />{' '}
+                {t('spawn.forceRefresh')}
               </button>
             </div>
             <div className="relative">
@@ -325,22 +327,22 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 type="text"
                 value={projectSearch}
                 onChange={(e) => setProjectSearch(e.target.value)}
-                placeholder="Search projects..."
+                placeholder={t('spawn.searchProjects')}
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 pl-9 pr-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
               />
             </div>
             <div className="mt-1.5 max-h-48 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg">
               {!projectsLoaded ? (
                 <p className="text-sm text-slate-500 px-3 py-2 italic">
-                  Loading projects from {roots.join(', ')}...
+                  {t('spawn.loadingProjects', { roots: roots.join(', ') })}
                 </p>
               ) : projects.length === 0 ? (
                 <p className="text-sm text-slate-500 px-3 py-2 italic">
-                  No projects found in {roots.join(', ')}
+                  {t('spawn.noProjects', { roots: roots.join(', ') })}
                 </p>
               ) : filteredProjects.length === 0 ? (
                 <p className="text-sm text-slate-500 px-3 py-2 italic">
-                  No projects match &ldquo;{projectSearch}&rdquo;
+                  {t('spawn.noProjectsMatch', { query: projectSearch })}
                 </p>
               ) : (
                 filteredProjects.map((p) => (
@@ -363,11 +365,11 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             <p className="text-[10px] text-slate-500 mt-1 italic">
               {roots.length === 1 ? (
                 <>
-                  Projects from{' '}
+                  {t('spawn.projectsFrom')}{' '}
                   <code className="bg-slate-900 px-1 rounded">{roots[0]}</code>
                 </>
               ) : (
-                <>Projects from {roots.length} directories</>
+                t('spawn.projectsFromMany', { count: roots.length })
               )}
             </p>
           </div>
@@ -378,7 +380,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5"
             >
               <FolderPlus size={12} />
-              Or Start in a New Folder
+              {t('spawn.newFolder')}
             </label>
             <input
               id="new-folder-name"
@@ -388,7 +390,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 setNewName(e.target.value);
                 setCreateError('');
               }}
-              placeholder="new-folder-name"
+              placeholder={t('spawn.newFolderPlaceholder')}
               className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm font-mono text-slate-50 focus:outline-none focus:border-accent transition-colors"
             />
             <label className="mt-1 py-1 flex items-center gap-2 text-xs text-slate-300">
@@ -398,7 +400,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 onChange={(e) => setGitInit(e.target.checked)}
                 disabled={!creatingNew}
               />
-              Run git init in the new folder
+              {t('spawn.gitInit')}
             </label>
             {createError ? (
               <p role="alert" className="text-xs text-red-400 mt-1">
@@ -407,12 +409,12 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             ) : (
               creatingNew && (
                 <p className="text-[10px] text-slate-500 mt-1 italic">
-                  Creates{' '}
+                  {t('spawn.creates')}{' '}
                   <code className="bg-slate-900 px-1 rounded">
                     {newProjectsDir ? `${newProjectsDir}/` : ''}
                     {newName.trim()}
                   </code>{' '}
-                  and starts the session there
+                  {t('spawn.createsThere')}
                 </p>
               )
             )}
@@ -424,7 +426,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 htmlFor="session-model"
                 className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2"
               >
-                Model
+                {t('spawn.model')}
               </label>
               <div className="relative">
                 <Search
@@ -436,7 +438,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                   type="text"
                   value={modelSearch}
                   onChange={(e) => setModelSearch(e.target.value)}
-                  placeholder="Search models..."
+                  placeholder={t('spawn.searchModels')}
                   autoComplete="off"
                   spellCheck={false}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 pl-9 pr-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
@@ -444,12 +446,12 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               </div>
               <div
                 role="listbox"
-                aria-label="Models"
+                aria-label={t('spawn.models')}
                 className="mt-1.5 max-h-40 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg"
               >
                 {filteredModels.length === 0 ? (
                   <p className="text-sm text-slate-500 px-3 py-2 italic">
-                    No models match &ldquo;{modelSearch}&rdquo;
+                    {t('spawn.noModelsMatch', { query: modelSearch })}
                   </p>
                 ) : (
                   filteredModels.map((m) => (
@@ -473,7 +475,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               {recentShown.length > 0 && (
                 <div
                   role="group"
-                  aria-label="Recent models"
+                  aria-label={t('spawn.recentModels')}
                   className="mt-1.5 flex flex-wrap gap-1.5"
                 >
                   {recentShown.map((m) => (
@@ -496,18 +498,22 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               )}
               <p className="text-[10px] text-slate-500 mt-1 italic">
                 {modelsLoading ? (
-                  'Refreshing model list...'
+                  t('spawn.refreshingModels')
                 ) : (
                   <>
-                    Selected:{' '}
+                    {t('spawn.selected')}{' '}
                     <code className="bg-slate-900 px-1 rounded">{model}</code>{' '}
-                    &middot; {filteredModels.length} of {models.length} shown
+                    &middot;{' '}
+                    {t('spawn.modelsShown', {
+                      shown: filteredModels.length,
+                      total: models.length,
+                    })}
                   </>
                 )}
               </p>
               {modelsError && (
                 <p role="alert" className="text-xs text-amber-400 mt-1">
-                  {modelsError} The list may be incomplete.
+                  {modelsError} {t('spawn.modelsIncomplete')}
                 </p>
               )}
             </div>
@@ -519,16 +525,16 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             >
               <div className="flex-1 min-w-0">
                 <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
-                  Session Mode
+                  {t('spawn.sessionMode')}
                 </label>
                 <p className="text-[10px] text-slate-500 mt-0.5">
                   {creatingNew
-                    ? 'New session (the folder is new)'
+                    ? t('spawn.modeNewFolder')
                     : effectiveWorktree
-                      ? 'New session (required for worktree isolation)'
+                      ? t('spawn.modeWorktree')
                       : effectiveResume
-                        ? 'Continue the most recent session in this project'
-                        : 'Start a fresh session'}
+                        ? t('spawn.modeResume')
+                        : t('spawn.modeNew')}
                 </p>
               </div>
               <button
@@ -546,7 +552,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 />
               </button>
               <span className="text-xs text-slate-300 font-medium w-16 shrink-0">
-                {effectiveResume ? 'Resume' : 'New'}
+                {effectiveResume ? t('spawn.resume') : t('spawn.new')}
               </span>
             </div>
           )}
@@ -557,19 +563,19 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             <div className="flex-1 min-w-0">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
                 <GitFork size={12} />
-                Worktree Isolation
+                {t('spawn.worktreeIsolation')}
               </label>
               <p className="text-[10px] text-slate-500 mt-0.5">
                 {!canWorktree
-                  ? 'Not a git repository: agent works directly in the folder'
+                  ? t('spawn.worktreeNotGit')
                   : effectiveWorktree
-                    ? 'Create a separate working copy for this agent'
-                    : 'Agent works directly in the project directory'}
+                    ? t('spawn.worktreeOn')
+                    : t('spawn.worktreeOff')}
               </p>
             </div>
             <button
               type="button"
-              aria-label="Worktree isolation"
+              aria-label={t('spawn.worktreeToggle')}
               onClick={() => setUseWorktree(!useWorktree)}
               disabled={!canWorktree}
               className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors after:absolute after:-inset-2 after:content-[''] ${
@@ -583,7 +589,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               />
             </button>
             <span className="text-xs text-slate-300 font-medium w-16 shrink-0">
-              {effectiveWorktree ? 'Isolated' : 'Shared'}
+              {effectiveWorktree ? t('spawn.isolated') : t('spawn.shared')}
             </span>
           </div>
 
@@ -592,7 +598,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               htmlFor="session-name"
               className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2"
             >
-              Session Name (Optional)
+              {t('spawn.sessionName')}
             </label>
             <input
               id="session-name"
@@ -601,20 +607,20 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
               onChange={(e) => setSessionName(e.target.value)}
               maxLength={60}
               autoComplete="off"
-              placeholder="Shown on the tab instead of tool · project"
+              placeholder={t('spawn.sessionNamePlaceholder')}
               className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-4 text-sm text-slate-50 focus:outline-none focus:border-accent transition-colors"
             />
           </div>
 
           <div>
             <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-              Task Description (Optional)
+              {t('spawn.task')}
             </label>
             <textarea
               value={task}
               onChange={(e) => setTask(e.target.value)}
               className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2.5 px-4 text-slate-50 focus:outline-none focus:border-accent transition-colors min-h-[100px] resize-none"
-              placeholder="Describe the objective for this session..."
+              placeholder={t('spawn.taskPlaceholder')}
             />
           </div>
         </div>
@@ -624,7 +630,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
             onClick={onClose}
             className="flex-1 px-4 py-2.5 rounded-xl font-bold text-slate-400 hover:text-slate-50 transition-colors"
           >
-            Cancel
+            {t('spawn.cancel')}
           </button>
           <button
             onClick={handleInitialize}
@@ -635,7 +641,7 @@ const SpawnModal: React.FC<SpawnModalProps> = ({
                 : 'bg-slate-700 text-slate-500 cursor-not-allowed border border-slate-600'
             }`}
           >
-            Initialize Agent
+            {t('spawn.initialize')}
           </button>
         </div>
       </div>

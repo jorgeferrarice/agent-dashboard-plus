@@ -39,6 +39,21 @@ A multi-host orchestration platform for AI coding agents — spawn, monitor, and
   Graphify, Ponytail) and a set of skills into Claude Code, Codex
   and Grok, picked from a menu. See [Agent harness](#agent-harness).
 
+**Tasks**
+- **Tasks tab** — A Kanban board (or list) of your tasks, opened
+  from the Dashboard as a tab: local tasks plus your issues and
+  stories from Jira Cloud and Shortcut, and (experimental) issues
+  from self-hosted Huly — change status (drag or
+  dropdown), comment, reassign and create them without leaving the
+  dashboard. Encrypted per-user connections. See
+  [Tasks tab](docs/tasks.md).
+
+**Language**
+- **Português e inglês** — The interface is in Portuguese (Brazil)
+  by default, with English one click away in the settings cog; the
+  choice follows the user across devices. See
+  [Interface language](docs/i18n.md).
+
 **Sessions**
 - **Tabs instead of popups** — Sessions open as tabs next to the
   Dashboard, sharing one Socket.IO connection per page. Only the
@@ -69,7 +84,8 @@ A multi-host orchestration platform for AI coding agents — spawn, monitor, and
   its button with a warning mark.
 - **Plan limits** — Each host card shows how much of the five-hour
   and weekly allowance each account has used.
-- **Host settings** — Hide or rename each tool's button per host.
+- **Host settings** — Hide or rename each tool's button per host,
+  and change the command line that starts it (e.g. add flags).
 
 **Mobile**
 - **Phone layout** — Compact header, larger touch targets, smaller
@@ -108,9 +124,9 @@ cd agent-dashboard-plus
 ./setup.sh            # interactive
 ./setup.sh --dry-run  # print every step without running it
 ./setup.sh --harness  # only the agent harness step (add-ons and skills)
-./setup.sh --help
 ./setup.sh --add-host # register another computer (run on the dashboard machine)
 ./setup.sh --join     # connect this computer to an existing dashboard
+./setup.sh --help
 ```
 
 Supported: macOS, and Linux with `apt` or `dnf`. The script is
@@ -157,7 +173,6 @@ installing anything. It:
 9. **Agent harness** — add-ons and skills for every agent you run.
    See [Agent harness](#agent-harness).
 
-### Agent harness
 ### Adding another computer
 
 One dashboard can drive agents on many computers. Each extra
@@ -198,6 +213,7 @@ another private route, such as Tailscale).
 The computer appears on the dashboard once its daemon connects.
 `--join` refuses to run on the dashboard machine itself.
 
+### Agent harness
 
 `./setup.sh` (or `./setup.sh --harness` on its own) installs a
 default harness into the AI agents on the machine. Two menus,
@@ -374,6 +390,11 @@ session cost.
   that is installed but not signed in keeps its button, with a
   warning mark. A tool with saved settings that is no longer
   found stays in the list, muted, and comes back as it was.
+  Open **Command** under a tool to change how it starts: one line
+  for new sessions, one for resumed ones, written as in a shell
+  (`claude --model opus --verbose`). The default is shown greyed
+  out; leave the field blank to keep it. Changes apply to sessions
+  started afterwards.
 - **Several accounts of one tool** — Extra configuration
   directories with a signed-in account (`~/.claude-work`,
   `~/.codex-team`, ...) are found by the daemon and each gets its
@@ -736,6 +757,22 @@ each have their own isolated worktree with a separate branch.
 | Agent card reappears after clicking Stop | Terminal popup auto-reconnects the session | Close the terminal window before stopping, or upgrade to v0.3.1+ |
 | `1;2c` appears in agent input | Terminal DA response leaks into stdin | Upgrade to v0.3.1+ (filtered automatically) |
 | Token counts grow unrealistically | OTLP cumulative counters were double-counted | Upgrade to v0.3.1+ |
+
+### When a tab or the whole dashboard shows an error
+
+If a tab (Dashboard, Tasks, or a session) breaks while drawing, it
+shows the error in place of its content; the other tabs keep
+working. If the whole dashboard breaks, a full-screen error page
+appears instead of a blank screen.
+
+Both screens include an **error log**: where it broke, the error
+message, the JavaScript and React component stacks, the browser,
+and the last errors the page saw. Click **Copy log** and paste it
+into an AI chat or a GitHub issue to debug it. **Try again**
+redraws the tab; **Reload page** reloads the dashboard. The log
+leaves out the page's query string, which can hold login codes.
+The same log is printed to the browser console as
+`[ErrorBoundary] ... crashed`.
 
 ## Similar Tools
 

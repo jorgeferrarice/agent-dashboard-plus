@@ -8,6 +8,20 @@ const api = axios.create({
   withCredentials: true, // Required for session cookies from OIDC
 });
 
+// The API only answers with JSON. An HTML answer is the
+// frontend's index.html fallback: the route is not proxied to the
+// backend (see frontend/nginx.conf). Fail with that, instead of
+// handing a page of HTML to code that expects data.
+api.interceptors.response.use((response) => {
+  const type = String(response.headers?.['content-type'] ?? '');
+  if (type.includes('text/html')) {
+    throw new Error(
+      `${response.config.url} returned HTML instead of JSON: is it proxied to the backend (frontend/nginx.conf)?`,
+    );
+  }
+  return response;
+});
+
 /** Tool metadata reported by the daemon from profiles. */
 export interface ToolInfo {
   name: string;
@@ -28,6 +42,9 @@ export interface ToolInfo {
   /** Whether the tool has plan limits at all (bash has none).
    *  They may still be unreadable: see Host.projects.usage. */
   has_limits?: boolean;
+  /** Default command lines from the tool's profile, quoted as
+   *  in a shell. Missing on older daemons. */
+  commands?: { new: string; resume: string };
 }
 
 /** One plan limit of a tool, e.g. the five hour window. */
@@ -59,7 +76,20 @@ export interface ToolSetting {
   enabled: boolean;
   /** Name shown on the spawn button; null for the default. */
   label: string | null;
+  /** Command line for new sessions; null for the profile's. */
+  command_new?: string | null;
+  /** Command line for resumed sessions; null for the profile's. */
+  command_resume?: string | null;
 }
+
+/** Changes to a tool's settings. Fields left out keep their
+ *  value; a blank string restores the default. */
+export type ToolSettingChange = {
+  enabled?: boolean;
+  label?: string;
+  command_new?: string;
+  command_resume?: string;
+};
 
 /**
  * Normalizes a tool entry from available_tools into a
@@ -138,14 +168,14 @@ export const getHosts = async (): Promise<Host[]> => {
 };
 
 /**
- * Enables, disables or renames an AI tool on a host. Fields
- * left out keep their value; a blank label restores the
- * default name. Resolves to all the host's tool settings.
+ * Enables, disables, renames or sets the command lines of an AI
+ * tool on a host. Fields left out keep their value; a blank
+ * one restores the default. Resolves to all the host's tool settings.
  */
 export const updateToolSetting = async (
   hostId: number,
   tool: string,
-  change: { enabled?: boolean; label?: string },
+  change: ToolSettingChange,
 ): Promise<ToolSetting[]> => {
   const response = await api.put(
     `/hosts/${hostId}/tools/${encodeURIComponent(tool)}/settings`,
@@ -323,3 +353,16 @@ export const getToolModels = async (
   );
   return response.data;
 };
+
+/** Preferences that follow the user across devices. */
+export interface Preferences {
+  /** "pt-BR" or "en"; null until the user picks one. */
+  language: string | null;
+}
+
+export const getPreferences = async (): Promise<Preferences> =>
+  (await api.get('/me/preferences')).data;
+
+export const savePreferences = async (
+  prefs: Preferences,
+): Promise<Preferences> => (await api.put('/me/preferences', prefs)).data;

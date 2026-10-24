@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import { Info } from 'lucide-react';
 import { updateTaskDescription } from '../../api';
+import { useI18n } from '../../i18n';
 
 /**
  * Inline-editable task description. Click to edit, Enter to
@@ -11,6 +12,7 @@ const EditableTaskDescription: React.FC<{
   agentId: string;
   description: string;
 }> = ({ agentId, description }) => {
+  const { t } = useI18n();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(description);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -64,7 +66,7 @@ const EditableTaskDescription: React.FC<{
         onBlur={save}
         enterKeyHint="done"
         className="w-full bg-slate-800 text-[11px] text-slate-200 px-1.5 py-0.5 rounded border border-accent-muted outline-none focus:border-accent"
-        placeholder="Describe the task..."
+        placeholder={t('taskDescription.placeholder')}
       />
     );
   }
@@ -73,10 +75,10 @@ const EditableTaskDescription: React.FC<{
     <p
       className="text-[11px] text-slate-300 line-clamp-2 leading-relaxed cursor-pointer hover:text-slate-100 transition-colors"
       onClick={startEditing}
-      title="Click to edit task description"
+      title={t('taskDescription.editTitle')}
     >
       <Info size={10} className="inline mr-1 text-slate-500" />
-      {description || 'Add a description...'}
+      {description || t('taskDescription.empty')}
     </p>
   );
 };

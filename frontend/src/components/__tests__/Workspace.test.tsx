@@ -13,6 +13,7 @@ import type { Agent } from '../../api';
 type DashboardProps = {
   onAttach: (id: string) => void;
   onAgentsChange?: (agents: Agent[]) => void;
+  onOpenTasks?: () => void;
 };
 let dashboard: DashboardProps;
 const terminalMounts: string[] = [];
@@ -52,6 +53,9 @@ vi.mock('../Terminal', async () => {
     },
   };
 });
+vi.mock('../tasks/TasksView', () => ({
+  default: () => <div>tasks-board</div>,
+}));
 const renamed: [string, string][] = [];
 // What the server holds as the user's open tabs.
 const server: { tabs: string[] | null } = { tabs: null };
@@ -110,6 +114,35 @@ beforeEach(() => {
 });
 
 describe('Workspace', () => {
+  it('opens the Tasks tab from the dashboard and keeps it across agent updates and reloads', async () => {
+    const first = render(<Workspace />);
+    report([agent('a')]);
+    act(() => dashboard.onOpenTasks?.());
+    expect(tab(/Tasks/)).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('tasks-board')).toBeInTheDocument();
+    expect(screen.queryByText(/terminal:/)).not.toBeInTheDocument();
+
+    // An agent list without a "tasks" agent does not drop it.
+    report([agent('b')]);
+    expect(tab(/Tasks/)).toBeInTheDocument();
+
+    // Opening it again focuses the same tab.
+    attach('b');
+    act(() => dashboard.onOpenTasks?.());
+    expect(screen.getAllByRole('tab', { name: /Tasks/ })).toHaveLength(1);
+
+    // It is restored, by its ID, after a reload.
+    await act(async () => {});
+    expect(server.tabs).toContain('tasks');
+    first.unmount();
+    render(<Workspace />);
+    report([agent('b')]);
+    expect(tab(/Tasks/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab Tasks' }));
+    expect(screen.queryByRole('tab', { name: /Tasks/ })).toBeNull();
+  });
+
   it('opens a session in a tab and mounts only the active terminal', () => {
     render(<Workspace />);
     report([agent('a'), agent('b')]);

@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== Backend Unit Tests (pytest + coverage) ==="
 cd "$PROJECT_ROOT"
-pytest backend/tests/test_main.py \
+pytest backend/tests/test_main.py backend/tests/test_tasks*.py \
     --cov=backend/app \
     --cov-config=pyproject.toml \
     --cov-report=term-missing \

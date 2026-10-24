@@ -9,8 +9,9 @@ import {
   Radiation,
   Trash2,
 } from 'lucide-react';
-import type { Host, Agent } from '../../api';
+import type { Host, Agent, ToolSettingChange } from '../../api';
 import { normalizeToolInfo } from '../../api';
+import { useI18n } from '../../i18n';
 import AgentSessionCard from './AgentSessionCard';
 import HostLimits from './HostLimits';
 import HostSettingsModal from './HostSettingsModal';
@@ -30,7 +31,7 @@ interface HostCardProps {
   onToolSetting: (
     hostId: number,
     tool: string,
-    change: { enabled?: boolean; label?: string },
+    change: ToolSettingChange,
   ) => Promise<void>;
 }
 
@@ -48,6 +49,7 @@ const HostCard: React.FC<HostCardProps> = ({
   onDeleteHost,
   onToolSetting,
 }) => {
+  const { t, language } = useI18n();
   const isOnline = host.status === 'online';
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [restartOpen, setRestartOpen] = useState(false);
@@ -75,19 +77,22 @@ const HostCard: React.FC<HostCardProps> = ({
           </span>
           {isOnline ? (
             <span className="inline-flex items-center gap-1 text-green-400 text-[10px] font-semibold uppercase">
-              <Wifi size={10} /> Online
+              <Wifi size={10} /> {t('host.online')}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 text-slate-500 text-[10px] font-semibold uppercase">
-              <WifiOff size={10} /> Offline
+              <WifiOff size={10} /> {t('host.offline')}
             </span>
           )}
           <span className="hidden sm:inline text-[10px] text-slate-500">
-            Registered: {new Date(host.created_at).toLocaleDateString()}
+            {t('host.registered', {
+              date: new Date(host.created_at).toLocaleDateString(language),
+            })}
           </span>
           <span className="text-[10px] text-slate-500 ml-auto">
-            {agents.length} agent
-            {agents.length !== 1 ? 's' : ''}
+            {t(agents.length === 1 ? 'host.agentCount' : 'host.agentsCount', {
+              count: agents.length,
+            })}
           </span>
         </div>
 
@@ -102,8 +107,8 @@ const HostCard: React.FC<HostCardProps> = ({
                 key={tool.name}
                 title={
                   signedOut
-                    ? `Spawn ${label} — not signed in on this host: it will ask you to log in`
-                    : `Spawn ${label}`
+                    ? t('host.spawnSignedOutTitle', { label })
+                    : t('host.spawnTitle', { label })
                 }
                 onClick={() => onSpawnClick(host.id, tool.name)}
                 disabled={!isOnline}
@@ -118,7 +123,7 @@ const HostCard: React.FC<HostCardProps> = ({
                   <AlertTriangle
                     size={12}
                     role="img"
-                    aria-label="Not signed in"
+                    aria-label={t('host.notSignedIn')}
                     className="text-amber-400"
                   />
                 )}
@@ -128,24 +133,24 @@ const HostCard: React.FC<HostCardProps> = ({
           <button
             onClick={() => setSettingsOpen(true)}
             className="text-xs px-3 py-2 sm:py-1.5 rounded-md border transition-colors flex items-center gap-1.5 bg-slate-700/50 hover:bg-slate-700 text-slate-300 border-slate-600 cursor-pointer ml-auto"
-            title="Host settings: choose and rename AI tools"
+            title={t('host.settingsTitle')}
           >
-            <Settings size={14} /> Settings
+            <Settings size={14} /> {t('host.settings')}
           </button>
           <button
             onClick={() => setRestartOpen(true)}
             disabled={!isOnline}
             className="text-xs px-3 py-2 sm:py-1.5 rounded-md border transition-colors flex items-center gap-1.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border-amber-500/30 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Restart this host's daemon: ends every session on it"
+            title={t('host.restartTitle')}
           >
-            <Radiation size={14} /> Restart
+            <Radiation size={14} /> {t('host.restart')}
           </button>
           <button
             onClick={() => onDeleteHost(host.id)}
             className="text-xs px-3 py-2 sm:py-1.5 rounded-md border transition-colors flex items-center gap-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-400 border-red-500/30 cursor-pointer"
-            title="Delete Host"
+            title={t('host.deleteTitle')}
           >
-            <Trash2 size={14} /> Delete
+            <Trash2 size={14} /> {t('host.delete')}
           </button>
         </div>
 
@@ -176,7 +181,7 @@ const HostCard: React.FC<HostCardProps> = ({
         </div>
       ) : (
         <div className="px-3 sm:px-6 py-3 text-sm text-slate-500 italic">
-          No active sessions
+          {t('host.noSessions')}
         </div>
       )}
       {settingsOpen && (

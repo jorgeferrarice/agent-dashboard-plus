@@ -1,3 +1,5 @@
+import pathlib
+import re
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -654,11 +656,23 @@ def test_tool_settings_disable_rename_and_cascade():
 
     url = f"/hosts/{hid}/tools/claude-work/settings"
     assert client.put(url, json={"label": "  Trabalho "}).json() == [
-        {"tool": "claude-work", "enabled": True, "label": "Trabalho"}
+        {
+            "tool": "claude-work",
+            "enabled": True,
+            "label": "Trabalho",
+            "command_new": None,
+            "command_resume": None,
+        }
     ]
     # Fields left out keep their value; blank restores the default.
     assert client.put(url, json={"enabled": False}).json() == [
-        {"tool": "claude-work", "enabled": False, "label": "Trabalho"}
+        {
+            "tool": "claude-work",
+            "enabled": False,
+            "label": "Trabalho",
+            "command_new": None,
+            "command_resume": None,
+        }
     ]
     assert client.put(url, json={"label": ""}).json()[0]["label"] is None
     assert client.put(url, json={"label": "x" * 41}).status_code == 422
@@ -666,7 +680,13 @@ def test_tool_settings_disable_rename_and_cascade():
 
     listed = [h for h in client.get("/hosts").json() if h["id"] == hid][0]
     assert listed["tool_settings"] == [
-        {"tool": "claude-work", "enabled": False, "label": None}
+        {
+            "tool": "claude-work",
+            "enabled": False,
+            "label": None,
+            "command_new": None,
+            "command_resume": None,
+        }
     ]
 
     refused = client.post(
@@ -701,6 +721,43 @@ def test_tool_settings_disable_rename_and_cascade():
         )
     finally:
         db.close()
+
+
+def test_tool_command_lines_reach_the_daemon():
+    """Command lines saved for a tool are sent with its spawns;
+    blank restores the profile's."""
+    from unittest.mock import AsyncMock, patch
+
+    from backend.app import models
+
+    hid = client.post(
+        "/hosts", json={"name": "cmd-host", "host_token": "cmd-token"}
+    ).json()["id"]
+    db = TestingSessionLocal()
+    db.query(models.Host).filter(models.Host.id == hid).update({"status": "online"})
+    db.commit()
+    db.close()
+
+    url = f"/hosts/{hid}/tools/claude/settings"
+    saved = client.put(url, json={"command_new": " claude --model opus "}).json()
+    assert saved[0]["command_new"] == "claude --model opus"
+    assert saved[0]["command_resume"] is None
+
+    def spawned_commands():
+        with patch("backend.app.socket.sio.emit", new=AsyncMock()) as emit:
+            r = client.post(
+                "/agents/spawn", json={"host_id": hid, "tool_name": "claude"}
+            )
+            assert r.status_code == 200
+        payload = next(
+            c.args[1] for c in emit.call_args_list if c.args[0] == "spawn_agent"
+        )
+        return payload["commands"]
+
+    assert spawned_commands() == {"new": "claude --model opus", "resume": None}
+    client.put(url, json={"command_new": ""})
+    assert spawned_commands() == {"new": None, "resume": None}
+    assert client.put(url, json={"command_new": "x" * 2001}).status_code == 422
 
 
 def test_allowed_emails_limits_oidc_users(monkeypatch):
@@ -741,6 +798,33 @@ def test_socket_ui_client_needs_allowed_email(monkeypatch):
     async def connect(environ):
         return await socket.connect("sid-ui", environ, None)
 
+    # The handler is called directly, without a real connection:
+    # record the room it joins instead of joining it.
+    rooms = []
+
+    async def enter_room(sid, room, namespace=None):
+        rooms.append(room)
+
+    monkeypatch.setattr(socket.sio, "enter_room", enter_room)
+
     assert asyncio.run(connect(environ_for("me@example.com"))) is True
+    # Allowed UI users join their own room (Tasks tab updates).
+    assert rooms == ["user:me@example.com"]
     assert asyncio.run(connect(environ_for("stranger@gmail.com"))) is False
     assert asyncio.run(connect({"asgi.scope": {"headers": []}})) is False
+
+
+def test_nginx_proxies_every_backend_route():
+    """Each top-level API path is in the frontend nginx proxy list.
+
+    A path missing from that list gets the single-page app's
+    index.html instead of JSON (the Tasks tab broke this way).
+    """
+    conf = (
+        pathlib.Path(__file__).resolve().parents[2] / "frontend" / "nginx.conf"
+    ).read_text()
+    match = re.search(r"location ~ \^/\(([^)]*)\)", conf)
+    assert match, "proxy location not found in frontend/nginx.conf"
+    proxied = set(match.group(1).split("|"))
+    prefixes = {path.split("/")[1] for path in fastapi_app.openapi()["paths"]}
+    assert prefixes <= proxied, f"not proxied by nginx: {prefixes - proxied}"

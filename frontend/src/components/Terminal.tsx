@@ -29,6 +29,8 @@ import {
 } from '../api';
 import { getToolColorsByKeyword } from './dashboard/utils';
 import { openTerminalWindow } from './terminalWindow';
+import { useI18n } from '../i18n';
+import type { I18n, MessageKey } from '../i18n';
 
 interface TerminalProps {
   agentId: string;
@@ -72,11 +74,11 @@ const TOOL_COLORS: Record<ToolCategory, string> = {
   unknown: 'bg-slate-500',
 };
 
-const TOOL_LABELS: Record<ToolCategory, string> = {
+// The unknown bucket is labelled with the translated 'terminal.agent'.
+const TOOL_LABELS: Record<Exclude<ToolCategory, 'unknown'>, string> = {
   gemini: 'Gemini',
   claude: 'Claude',
   bash: 'Bash',
-  unknown: 'Agent',
 };
 
 /** Largest file a session accepts. Keep in sync with
@@ -84,35 +86,43 @@ const TOOL_LABELS: Record<ToolCategory, string> = {
 const MAX_UPLOAD_MB = 90;
 
 /** Why an upload failed, in words the user can act on. */
-function uploadErrorText(err: unknown): string {
+function uploadErrorText(err: unknown, t: I18n['t']): string {
   const res = (
     err as { response?: { status?: number; data?: { detail?: unknown } } }
   ).response;
   if (typeof res?.data?.detail === 'string') return res.data.detail;
-  if (res?.status === 413) return `larger than ${MAX_UPLOAD_MB} MB.`;
-  if (res?.status) return `the server answered ${res.status}.`;
+  if (res?.status === 413)
+    return t('terminal.uploadTooLarge', { mb: MAX_UPLOAD_MB });
+  if (res?.status) return t('terminal.uploadStatus', { status: res.status });
   // No answer at all: the browser could not read the item
   // (a folder, or a file it has no access to) or the
   // connection dropped.
-  return 'could not be read or sent. Folders are not supported.';
+  return t('terminal.uploadUnreadable');
 }
 
 /** Whether the primary input is a finger. */
 const isTouch = () => !!window.matchMedia?.('(pointer: coarse)').matches;
 
-/** Keys a phone keyboard lacks, as sent to the PTY. */
-const MOBILE_KEYS: { label: string; input: string; title: string }[] = [
+/** Keys a phone keyboard lacks, as sent to the PTY. `title` is
+ *  the key's name (also the React key); `name` translates it
+ *  where it is a word rather than a key cap. */
+const MOBILE_KEYS: {
+  label: string;
+  input: string;
+  title: string;
+  name?: MessageKey;
+}[] = [
   { label: 'Esc', input: '\x1b', title: 'Escape' },
   { label: 'Tab', input: '\t', title: 'Tab' },
   { label: '⇧Tab', input: '\x1b[Z', title: 'Shift+Tab' },
-  { label: '↑', input: '\x1b[A', title: 'Up' },
-  { label: '↓', input: '\x1b[B', title: 'Down' },
-  { label: '←', input: '\x1b[D', title: 'Left' },
-  { label: '→', input: '\x1b[C', title: 'Right' },
+  { label: '↑', input: '\x1b[A', title: 'Up', name: 'terminal.keyUp' },
+  { label: '↓', input: '\x1b[B', title: 'Down', name: 'terminal.keyDown' },
+  { label: '←', input: '\x1b[D', title: 'Left', name: 'terminal.keyLeft' },
+  { label: '→', input: '\x1b[C', title: 'Right', name: 'terminal.keyRight' },
   { label: '^C', input: '\x03', title: 'Ctrl+C' },
   { label: '^D', input: '\x04', title: 'Ctrl+D' },
   { label: '^R', input: '\x12', title: 'Ctrl+R' },
-  { label: '/', input: '/', title: 'Slash' },
+  { label: '/', input: '/', title: 'Slash', name: 'terminal.keySlash' },
   { label: '⌫', input: '\x7f', title: 'Backspace' },
   { label: '⏎', input: '\r', title: 'Enter' },
 ];
@@ -127,6 +137,7 @@ const MobileInputBar: React.FC<{
   send: (input: string) => void;
   onShowText: () => void;
 }> = ({ send, onShowText }) => {
+  const { t } = useI18n();
   const [text, setText] = useState('');
   const submit = () => {
     if (text) {
@@ -147,8 +158,8 @@ const MobileInputBar: React.FC<{
           <button
             key={k.title}
             type="button"
-            title={k.title}
-            aria-label={k.title}
+            title={k.name ? t(k.name) : k.title}
+            aria-label={k.name ? t(k.name) : k.title}
             // Keep the focus (and the keyboard) where it is.
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => send(k.input)}
@@ -168,8 +179,8 @@ const MobileInputBar: React.FC<{
         <button
           type="button"
           onClick={onShowText}
-          aria-label="Select text"
-          title="Show the screen as text to select and copy"
+          aria-label={t('terminal.selectText')}
+          title={t('terminal.selectTextTitle')}
           className="shrink-0 w-11 h-10 rounded-md bg-slate-800 active:bg-slate-600 text-slate-300 border border-slate-700 flex items-center justify-center"
         >
           <TextSelect size={18} />
@@ -185,14 +196,14 @@ const MobileInputBar: React.FC<{
             }
           }}
           enterKeyHint="send"
-          placeholder="Type a message…"
-          aria-label="Message to the session"
+          placeholder={t('terminal.messagePlaceholder')}
+          aria-label={t('terminal.messageLabel')}
           className="flex-1 min-w-0 min-h-10 max-h-28 [field-sizing:content] resize-none bg-slate-800 border border-slate-700 rounded-md px-2 py-1.5 text-slate-50 focus:outline-none focus:border-accent"
         />
         <button
           type="submit"
           onMouseDown={(e) => e.preventDefault()}
-          aria-label={text ? 'Send' : 'Press Enter'}
+          aria-label={text ? t('terminal.send') : t('terminal.pressEnter')}
           className="shrink-0 w-11 h-10 rounded-md bg-accent active:bg-accent-hover text-accent-text flex items-center justify-center"
         >
           <SendHorizontal size={18} />
@@ -211,6 +222,7 @@ const Terminal: React.FC<TerminalProps> = ({
   onReplace,
   onDetach,
 }) => {
+  const { t } = useI18n();
   const embedded = !!sharedSocket;
   const openAgent = onOpenAgent ?? openTerminalWindow;
   // Callbacks read through refs so the xterm effect does not
@@ -305,11 +317,11 @@ const Terminal: React.FC<TerminalProps> = ({
       window.location.replace(`/terminal/${newAgent.agent_id}`);
     } catch (err) {
       console.error('Resume failed:', err);
-      setReconnectError('Failed to resume — the host may be offline.');
+      setReconnectError(t('terminal.resumeFailed'));
       setReconnecting(false);
       reconnectingRef.current = false;
     }
-  }, [agentId, agentDetail, onReplace]);
+  }, [agentId, agentDetail, onReplace, t]);
 
   // Listen for live telemetry updates to keep header fresh
   useEffect(() => {
@@ -870,26 +882,31 @@ const Terminal: React.FC<TerminalProps> = ({
       if (!files.length) {
         console.error('Drop carried no file:', e.dataTransfer.types);
         setUploadStatus({
-          text: 'The browser handed over no file. Drag it from a file manager.',
+          text: t('terminal.noFile'),
           error: true,
         });
         return;
       }
       setUploadStatus({
-        text: `Sending ${files.length === 1 ? files[0].name : `${files.length} files`}…`,
+        text: t('terminal.sending', {
+          name:
+            files.length === 1
+              ? files[0].name
+              : t('terminal.files', { count: files.length }),
+        }),
       });
       const paths: string[] = [];
       let error: string | null = null;
       for (const file of files) {
         if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-          error = `${file.name}: larger than ${MAX_UPLOAD_MB} MB.`;
+          error = `${file.name}: ${t('terminal.uploadTooLarge', { mb: MAX_UPLOAD_MB })}`;
           continue;
         }
         try {
           paths.push(await uploadFile(agentId, file));
         } catch (err) {
           console.error('Upload failed:', err);
-          error = `${file.name}: ${uploadErrorText(err)}`;
+          error = `${file.name}: ${uploadErrorText(err, t)}`;
         }
       }
       if (paths.length) {
@@ -899,7 +916,7 @@ const Terminal: React.FC<TerminalProps> = ({
       // An error stays until clicked or the next drop.
       setUploadStatus(error ? { text: error, error: true } : null);
     },
-    [agentId, sendInput],
+    [agentId, sendInput, t],
   );
 
   // Derived header values
@@ -918,7 +935,9 @@ const Terminal: React.FC<TerminalProps> = ({
   // Prefer display_name from profile metadata over the
   // hardcoded label map for the tool badge and title.
   const profileInfo = allTools.find((t) => t.name === agentDetail?.tool_name);
-  const toolLabel = profileInfo?.display_name || TOOL_LABELS[category];
+  const toolLabel =
+    profileInfo?.display_name ||
+    (category === 'unknown' ? t('terminal.agent') : TOOL_LABELS[category]);
   const toolBadgeColor = profileInfo?.color
     ? getToolColorsByKeyword(profileInfo.color).solid
     : TOOL_COLORS[category];
@@ -1030,12 +1049,14 @@ const Terminal: React.FC<TerminalProps> = ({
                 disabled={spawning}
                 className="shrink-0 flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium disabled:opacity-50"
                 aria-label={
-                  existing ? `Attach ${btn.label}` : `Open ${btn.label}`
+                  existing
+                    ? t('terminal.attach', { label: btn.label })
+                    : t('terminal.open', { label: btn.label })
                 }
                 title={
                   existing
-                    ? `Attach to existing ${btn.label} session`
-                    : `Open new ${btn.label} session`
+                    ? t('terminal.attachTitle', { label: btn.label })
+                    : t('terminal.openTitle', { label: btn.label })
                 }
               >
                 {existing ? (
@@ -1044,7 +1065,9 @@ const Terminal: React.FC<TerminalProps> = ({
                   <TerminalSquare size={12} />
                 )}
                 <span className="hidden md:inline">
-                  {existing ? `Attach ${btn.label}` : `Open ${btn.label}`}
+                  {existing
+                    ? t('terminal.attach', { label: btn.label })
+                    : t('terminal.open', { label: btn.label })}
                 </span>
                 <span className="md:hidden">{btn.label}</span>
               </button>
@@ -1055,22 +1078,24 @@ const Terminal: React.FC<TerminalProps> = ({
             // Touch devices have no separate windows.
             <button
               onClick={onDetach}
-              title="Move this session to its own window"
+              title={t('terminal.detachTitle')}
               className="hidden md:pointer-fine:flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium"
             >
               <SquareArrowOutUpRight size={12} />
-              <span>Detach</span>
+              <span>{t('terminal.detach')}</span>
             </button>
           )}
 
           <button
             onClick={onClose}
-            aria-label={embedded ? 'Close Tab' : 'Close Window'}
+            aria-label={
+              embedded ? t('terminal.closeTab') : t('terminal.closeWindow')
+            }
             className="shrink-0 flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-3 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-red-500/20 cursor-pointer"
           >
             <XCircle size={14} />
             <span className="hidden sm:inline font-semibold text-xs">
-              {embedded ? 'Close Tab' : 'Close Window'}
+              {embedded ? t('terminal.closeTab') : t('terminal.closeWindow')}
             </span>
           </button>
         </div>
@@ -1105,7 +1130,7 @@ const Terminal: React.FC<TerminalProps> = ({
 
         {dragging && (
           <div className="absolute inset-1 z-30 flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent bg-black/70 text-slate-100 text-sm pointer-events-none">
-            <Upload size={18} /> Drop files to send them to this session
+            <Upload size={18} /> {t('terminal.dropFiles')}
           </div>
         )}
 
@@ -1113,7 +1138,7 @@ const Terminal: React.FC<TerminalProps> = ({
           <div
             role={uploadStatus.error ? 'alert' : 'status'}
             onClick={() => setUploadStatus(null)}
-            title={uploadStatus.error ? 'Click to dismiss' : undefined}
+            title={uploadStatus.error ? t('terminal.dismiss') : undefined}
             className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-30 max-w-[90%] truncate px-4 py-2 rounded-md text-sm font-medium border shadow-lg cursor-pointer ${
               uploadStatus.error
                 ? 'bg-red-950 text-red-300 border-red-500/40'
@@ -1128,7 +1153,7 @@ const Terminal: React.FC<TerminalProps> = ({
           <div className="absolute inset-0 z-20 flex flex-col bg-slate-950">
             <div className="flex items-center gap-2 px-2 py-1 border-b border-slate-700 shrink-0">
               <span className="flex-1 text-xs text-slate-400">
-                Press and hold to select
+                {t('terminal.holdToSelect')}
               </span>
               <button
                 onClick={() =>
@@ -1136,11 +1161,11 @@ const Terminal: React.FC<TerminalProps> = ({
                 }
                 className="flex items-center gap-1.5 h-9 px-3 rounded-md bg-slate-800 active:bg-slate-600 text-slate-200 text-xs border border-slate-700"
               >
-                <Copy size={14} /> Copy all
+                <Copy size={14} /> {t('terminal.copyAll')}
               </button>
               <button
                 onClick={() => setScreenText(null)}
-                aria-label="Back to the terminal"
+                aria-label={t('terminal.backToTerminal')}
                 className="flex items-center justify-center h-9 w-11 rounded-md bg-accent text-accent-text"
               >
                 <X size={16} />
@@ -1174,7 +1199,7 @@ const Terminal: React.FC<TerminalProps> = ({
               {reconnecting ? (
                 <p className="text-slate-300 text-sm flex items-center gap-2">
                   <RefreshCw size={14} className="animate-spin" />
-                  Resuming session...
+                  {t('terminal.resuming')}
                 </p>
               ) : (
                 <>
@@ -1182,7 +1207,7 @@ const Terminal: React.FC<TerminalProps> = ({
                     role="alert"
                     className={`text-sm ${reconnectError ? 'text-red-400' : 'text-slate-300'}`}
                   >
-                    {reconnectError || 'This session has ended.'}
+                    {reconnectError || t('terminal.ended')}
                   </p>
                   <div className="flex gap-3 justify-center">
                     <button
@@ -1190,13 +1215,13 @@ const Terminal: React.FC<TerminalProps> = ({
                       disabled={!agentDetail}
                       className="bg-accent hover:bg-accent-hover text-accent-text font-bold px-4 py-2 rounded-xl transition-colors text-sm disabled:opacity-50"
                     >
-                      Resume
+                      {t('terminal.resume')}
                     </button>
                     <button
                       onClick={onClose}
                       className="text-slate-400 hover:text-slate-50 px-4 py-2 rounded-xl border border-slate-700 transition-colors text-sm"
                     >
-                      Close
+                      {t('terminal.close')}
                     </button>
                   </div>
                 </>

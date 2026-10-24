@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Radiation } from 'lucide-react';
 import type { Host } from '../../api';
 import { restartHost } from '../../api';
+import { useI18n } from '../../i18n';
 
 /** Props for the RestartHostModal component. */
 interface RestartHostModalProps {
@@ -12,11 +13,11 @@ interface RestartHostModalProps {
 }
 
 /** A mushroom cloud, drawn inline so the dialog needs no asset. */
-const MushroomCloud: React.FC = () => (
+const MushroomCloud: React.FC<{ label: string }> = ({ label }) => (
   <svg
     viewBox="0 0 120 120"
     role="img"
-    aria-label="Nuclear explosion"
+    aria-label={label}
     className="w-32 h-32 mx-auto motion-safe:animate-pulse"
   >
     <defs>
@@ -46,6 +47,7 @@ const RestartHostModal: React.FC<RestartHostModalProps> = ({
   sessions,
   onClose,
 }) => {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,7 +60,7 @@ const RestartHostModal: React.FC<RestartHostModalProps> = ({
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: unknown } } })
         .response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'Restart failed.');
+      setError(typeof detail === 'string' ? detail : t('restart.failed'));
       setBusy(false);
     }
   };
@@ -75,18 +77,20 @@ const RestartHostModal: React.FC<RestartHostModalProps> = ({
         aria-describedby="restart-host-text"
         className="bg-slate-900 border border-red-500/50 rounded-2xl w-full max-w-sm shadow-2xl shadow-red-900/40 p-6 text-center"
       >
-        <MushroomCloud />
+        <MushroomCloud label={t('restart.explosion')} />
         <h3
           id="restart-host-title"
           className="mt-3 text-xl font-bold text-red-400 flex items-center justify-center gap-2"
         >
-          <Radiation size={22} /> Restart {host.name}?
+          <Radiation size={22} /> {t('restart.title', { host: host.name })}
         </h3>
         <p id="restart-host-text" className="mt-2 text-sm text-slate-300">
-          This nukes <strong className="text-red-300">every session</strong> on
-          this host
-          {sessions > 0 && ` (${sessions} running right now)`}. Anything a
-          session is doing stops. Conversations can be resumed afterwards.
+          {t('restart.nukes')}{' '}
+          <strong className="text-red-300">{t('restart.everySession')}</strong>{' '}
+          {t('restart.onHost')}
+          {sessions > 0 &&
+            ` ${t('restart.running', { count: sessions })}`}.{' '}
+          {t('restart.stops')}
         </p>
         {error && (
           <p role="alert" className="mt-3 text-sm text-red-400">
@@ -99,14 +103,14 @@ const RestartHostModal: React.FC<RestartHostModalProps> = ({
             onClick={onClose}
             className="flex-1 px-3 py-2 rounded-md border border-slate-600 bg-slate-700/60 hover:bg-slate-600 text-slate-200 text-sm cursor-pointer"
           >
-            Cancel
+            {t('restart.cancel')}
           </button>
           <button
             onClick={restart}
             disabled={busy}
             className="flex-1 px-3 py-2 rounded-md bg-red-600 hover:bg-red-500 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
           >
-            {busy ? 'Restarting…' : 'Nuke & restart'}
+            {busy ? t('restart.restarting') : t('restart.confirm')}
           </button>
         </div>
       </div>

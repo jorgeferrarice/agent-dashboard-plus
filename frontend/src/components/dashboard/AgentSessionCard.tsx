@@ -25,6 +25,7 @@ import {
   isModelRecognized,
 } from './utils';
 import StatusIndicator from './StatusIndicator';
+import { useI18n } from '../../i18n';
 import EditableTaskDescription from './EditableTaskDescription';
 
 /** Props for the AgentSessionCard component. */
@@ -48,10 +49,11 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
   onAttach,
   onStop,
 }) => {
+  const { t, language } = useI18n();
   const tel = agent.telemetry || {};
   // Prefer profile color from available_tools metadata,
   // falling back to name-based inference.
-  const toolInfo = availableTools?.find((t) => t.name === agent.tool_name);
+  const toolInfo = availableTools?.find((ti) => ti.name === agent.tool_name);
   const toolColors = toolInfo?.color
     ? getToolColorsByKeyword(toolInfo.color)
     : getToolColors(agent.tool_name);
@@ -79,10 +81,10 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
         );
   const costSource =
     tel.cost_usd && tel.cost_usd > 0
-      ? 'Reported by CLI'
-      : 'Estimated from token usage';
+      ? t('session.costReported')
+      : t('session.costEstimated');
   const mcpServers = tel.mcp_servers || [];
-  const project = tel.git_project || 'Agent';
+  const project = tel.git_project || t('session.titleFallback');
   const title = tel.session_name || project;
   const projectInMeta = !!tel.session_name;
   const showModel = !!(
@@ -90,7 +92,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
     (tel.model && tel.model !== 'detecting...')
   );
   const summaryParts = [
-    ctxTokens ? `${Math.round(tokenPct)}% ctx` : '',
+    ctxTokens ? t('session.ctxSummary', { pct: Math.round(tokenPct) }) : '',
     displayCost ? formatCost(displayCost) : '',
   ].filter(Boolean);
   const activityCls = `text-[10px] text-slate-500 font-mono truncate${tel.task_description ? ' mt-1 pt-1 border-t border-slate-700/30' : ''}`;
@@ -104,7 +106,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
           <span
             className={`shrink-0 text-[10px] px-2 py-0.5 rounded font-bold uppercase border ${toolColors.badge}`}
           >
-            {agent.tool_name || 'agent'}
+            {agent.tool_name || t('session.toolFallback')}
           </span>
           {!projectInMeta && tel.git_remote_url ? (
             <a
@@ -153,7 +155,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
         {tel.worktree_path && (
           <span
             className="flex items-center gap-1 text-amber-400/70"
-            title={`Worktree: ${tel.worktree_path}`}
+            title={t('session.worktreeTitle', { path: tel.worktree_path })}
           >
             <GitFork size={10} /> worktree
           </span>
@@ -163,8 +165,8 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
             className="flex items-center gap-1 text-slate-500"
             title={
               tel.run_time_seconds
-                ? 'Active time (CLI-reported)'
-                : 'Elapsed since spawn'
+                ? t('session.activeTime')
+                : t('session.elapsed')
             }
           >
             <Clock size={10} />{' '}
@@ -180,7 +182,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
               size={12}
               className="shrink-0 transition-transform group-open/details:rotate-90"
             />
-            View details
+            {t('session.viewDetails')}
           </span>
           {summaryParts.length > 0 && (
             <span className="text-[10px] font-mono text-slate-500 truncate">
@@ -232,7 +234,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
                     : '...'}
                 </p>
                 {tel.model && !isModelRecognized(tel.model) && (
-                  <span title="Unrecognized model — context window and pricing may be inaccurate">
+                  <span title={t('session.unrecognizedModel')}>
                     <TriangleAlert
                       size={12}
                       className="text-amber-400 shrink-0"
@@ -243,10 +245,10 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
               <div className="mt-1">
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-[10px] text-slate-500 uppercase font-bold tracking-tight">
-                    Context
+                    {t('session.context')}
                   </span>
                   <span className="text-[10px] text-slate-400 font-mono">
-                    {ctxTokens ? ctxTokens.toLocaleString() : '—'} /{' '}
+                    {ctxTokens ? ctxTokens.toLocaleString(language) : '—'} /{' '}
                     {contextMax >= 1000000
                       ? `${(contextMax / 1000000).toFixed(1).replace('.0', '')}M`
                       : `${(contextMax / 1000).toFixed(0)}k`}
@@ -270,25 +272,32 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
                 </span>
                 <span className="text-[10px] text-slate-400 font-mono">
                   {tel.input_tokens
-                    ? formatTokenCount(tel.input_tokens) + ' in'
+                    ? t('session.tokensIn', {
+                        count: formatTokenCount(tel.input_tokens),
+                      })
                     : ''}
                   {tel.input_tokens && tel.output_tokens ? ' / ' : ''}
                   {tel.output_tokens
-                    ? formatTokenCount(tel.output_tokens) + ' out'
+                    ? t('session.tokensOut', {
+                        count: formatTokenCount(tel.output_tokens),
+                      })
                     : ''}
                 </span>
               </div>
               {!!(tel.cache_read_tokens || tel.cache_creation_tokens) && (
                 <p className="text-[10px] text-slate-500 font-mono text-right mt-0.5">
                   {tel.cache_read_tokens
-                    ? formatTokenCount(tel.cache_read_tokens) + ' cache read'
+                    ? t('session.cacheRead', {
+                        count: formatTokenCount(tel.cache_read_tokens),
+                      })
                     : ''}
                   {tel.cache_read_tokens && tel.cache_creation_tokens
                     ? ' / '
                     : ''}
                   {tel.cache_creation_tokens
-                    ? formatTokenCount(tel.cache_creation_tokens) +
-                      ' cache write'
+                    ? t('session.cacheWrite', {
+                        count: formatTokenCount(tel.cache_creation_tokens),
+                      })
                     : ''}
                 </p>
               )}
@@ -310,7 +319,7 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
           onClick={() => onAttach(agent.agent_id)}
           className="flex-1 bg-accent hover:bg-accent-hover text-accent-text font-bold py-2.5 sm:py-2 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 text-sm cursor-pointer"
         >
-          <Terminal size={16} /> Attach
+          <Terminal size={16} /> {t('session.attach')}
         </button>
         <button
           onClick={(e) => {
@@ -319,8 +328,8 @@ const AgentSessionCard: React.FC<AgentSessionCardProps> = ({
             onStop(agent.agent_id);
           }}
           className="w-12 sm:w-10 bg-red-600 hover:bg-red-500 text-slate-50 rounded-xl transition-colors flex items-center justify-center shadow-md active:scale-90 cursor-pointer"
-          title="Stop Agent"
-          aria-label="Stop Agent"
+          title={t('session.stop')}
+          aria-label={t('session.stop')}
         >
           <Square size={14} fill="currentColor" />
         </button>

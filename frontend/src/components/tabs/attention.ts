@@ -1,3 +1,4 @@
+import type { MessageKey } from '../../i18n';
 import type { Agent } from '../../api';
 
 /**
@@ -7,11 +8,11 @@ import type { Agent } from '../../api';
  */
 export type Attention = 'ended' | 'permission' | 'done';
 
-/** Short label for each attention kind. */
-export const ATTENTION_LABELS: Record<Attention, string> = {
-  ended: 'Session ended',
-  permission: 'Waiting for permission',
-  done: 'Finished working',
+/** Message key of the short label of each attention kind. */
+export const ATTENTION_LABELS: Record<Attention, MessageKey> = {
+  ended: 'attention.ended',
+  permission: 'attention.permission',
+  done: 'attention.done',
 };
 
 /** A status change worth telling the user about. */

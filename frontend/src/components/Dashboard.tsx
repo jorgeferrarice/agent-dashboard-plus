@@ -10,11 +10,19 @@ import {
   getVersion,
   updateToolSetting,
 } from '../api';
-import type { Host, Agent, ToolSetting, VersionInfo } from '../api';
+import type {
+  Host,
+  Agent,
+  ToolSetting,
+  ToolSettingChange,
+  VersionInfo,
+} from '../api';
 import { normalizeToolInfo } from '../api';
-import { Cpu, Activity } from 'lucide-react';
+import { Cpu, Activity, ListTodo } from 'lucide-react';
 import { getSocket } from '../socket';
 import LogoSvg from './LogoSvg';
+import { useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 import SpawnModal from './dashboard/SpawnModal';
 import HostCard from './dashboard/HostCard';
 
@@ -24,13 +32,21 @@ interface DashboardProps {
    *  workspace can label tabs and track attention without
    *  fetching or subscribing a second time. */
   onAgentsChange?: (agents: Agent[]) => void;
+  /** Opens the Tasks tab. */
+  onOpenTasks?: () => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
+const Dashboard: React.FC<DashboardProps> = ({
+  onAttach,
+  onAgentsChange,
+  onOpenTasks,
+}) => {
+  const { t } = useI18n();
   const [hosts, setHosts] = useState<Host[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // The message key, so the error follows a language change.
+  const [error, setError] = useState<MessageKey | null>(null);
 
   const [activeSpawn, setActiveSpawn] = useState<{
     hostId: number;
@@ -60,7 +76,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       setAgents(a);
       setError(null);
     } catch (err) {
-      setError('Failed to fetch dashboard data. Are you logged in?');
+      setError('dashboard.fetchFailed');
       console.error(err);
     } finally {
       setLoading(false);
@@ -99,16 +115,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       // tool that was disabled on the host from another browser).
       const detail = (err as { response?: { data?: { detail?: unknown } } })
         .response?.data?.detail;
-      alert(
-        typeof detail === 'string'
-          ? detail
-          : 'Failed to spawn agent. Check console for details.',
-      );
+      alert(typeof detail === 'string' ? detail : t('dashboard.spawnFailed'));
     }
   };
 
   const handleStop = async (agentId: string) => {
-    if (!window.confirm('Are you sure you want to stop this agent?')) return;
+    if (!window.confirm(t('dashboard.confirmStop'))) return;
     try {
       // An open tab or window for this agent closes itself
       // on the resulting "stopped" status event.
@@ -124,7 +136,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
   const handleToolSetting = async (
     hostId: number,
     tool: string,
-    change: { enabled?: boolean; label?: string },
+    change: ToolSettingChange,
   ) => {
     const toolSettings = await updateToolSetting(hostId, tool, change);
     setHosts((prev) =>
@@ -135,18 +147,13 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
   };
 
   const handleDeleteHost = async (hostId: number) => {
-    if (
-      !window.confirm(
-        'Are you sure you want to delete this host? All its agent sessions will also be removed.',
-      )
-    )
-      return;
+    if (!window.confirm(t('dashboard.confirmDeleteHost'))) return;
     try {
       await deleteHost(hostId);
       await fetchData();
     } catch (err) {
       console.error('Failed to delete host:', err);
-      alert('Failed to delete host. Check console for details.');
+      alert(t('dashboard.deleteHostFailed'));
     }
   };
 
@@ -265,7 +272,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
   });
 
   if (loading)
-    return <div className="p-8 text-slate-50">Loading dashboard...</div>;
+    return <div className="p-8 text-slate-50">{t('dashboard.loading')}</div>;
   if (error)
     return (
       <div className="p-4 sm:p-8 max-w-md mx-auto">
@@ -273,8 +280,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
           className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative"
           role="alert"
         >
-          <strong className="font-bold">Error: </strong>
-          <span className="block sm:inline">{error}</span>
+          <strong className="font-bold">{t('dashboard.error')} </strong>
+          <span className="block sm:inline">{t(error)}</span>
           <div className="mt-3">
             <a
               href={
@@ -284,7 +291,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
               }
               className="block text-center bg-red-700 hover:bg-red-600 text-white font-bold py-3 rounded-lg"
             >
-              Login via OIDC
+              {t('dashboard.login')}
             </a>
           </div>
         </div>
@@ -294,50 +301,61 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
   return (
     <div className="max-w-7xl mx-auto p-3 sm:p-8">
       <header className="mb-4 sm:mb-8 flex flex-col gap-3 sm:gap-4">
-        <h1 className="text-xl sm:text-3xl font-bold flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-50 min-w-0">
-          <LogoSvg className="w-7 h-7 sm:w-9 sm:h-9" />
-          Agent Dashboard
-          <span className="text-xs font-normal text-slate-500 font-mono self-end mb-0.5">
-            {appVersion}
-            {versionInfo?.update_available && versionInfo.latest && (
-              <>
-                {' '}
-                <span className="text-slate-600">→</span>{' '}
-                <a
-                  href={versionInfo.latest_url || '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-accent hover:underline"
-                >
-                  {versionInfo.latest} available
-                </a>
-              </>
-            )}
-            {!versionInfo?.update_available &&
-              versionInfo?.is_dev &&
-              versionInfo?.latest && (
+        <div className="flex items-start gap-3">
+          <h1 className="flex-1 text-xl sm:text-3xl font-bold flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-50 min-w-0">
+            <LogoSvg className="w-7 h-7 sm:w-9 sm:h-9" />
+            {t('dashboard.title')}
+            <span className="text-xs font-normal text-slate-500 font-mono self-end mb-0.5">
+              {appVersion}
+              {versionInfo?.update_available && versionInfo.latest && (
                 <>
                   {' '}
-                  <span className="text-slate-600">·</span>{' '}
+                  <span className="text-slate-600">→</span>{' '}
                   <a
                     href={versionInfo.latest_url || '#'}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-slate-500 hover:underline"
+                    className="text-accent hover:underline"
                   >
-                    latest: {versionInfo.latest}
+                    {t('dashboard.available', { version: versionInfo.latest })}
                   </a>
                 </>
               )}
-          </span>
-        </h1>
+              {!versionInfo?.update_available &&
+                versionInfo?.is_dev &&
+                versionInfo?.latest && (
+                  <>
+                    {' '}
+                    <span className="text-slate-600">·</span>{' '}
+                    <a
+                      href={versionInfo.latest_url || '#'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-slate-500 hover:underline"
+                    >
+                      {t('dashboard.latest', { version: versionInfo.latest })}
+                    </a>
+                  </>
+                )}
+            </span>
+          </h1>
+          {onOpenTasks && (
+            <button
+              onClick={onOpenTasks}
+              className="shrink-0 flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-200 hover:border-accent-muted hover:text-slate-50"
+            >
+              <ListTodo size={16} className="text-accent" />
+              {t('tabs.tasks')}
+            </button>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-2 sm:gap-4">
           <div className="bg-slate-800 p-2 sm:p-3 rounded-lg flex items-center gap-2 sm:gap-3">
             <Cpu className="text-accent w-5 h-5 sm:w-6 sm:h-6" />
             <div>
               <p className="text-[10px] sm:text-xs text-slate-400">
-                <span className="sm:hidden">Hosts</span>
-                <span className="hidden sm:inline">Registered Hosts</span>
+                <span className="sm:hidden">{t('dashboard.hostsShort')}</span>
+                <span className="hidden sm:inline">{t('dashboard.hosts')}</span>
               </p>
               <p className="font-bold text-slate-50">{hosts.length}</p>
             </div>
@@ -346,8 +364,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
             <Activity className="text-green-400 w-5 h-5 sm:w-6 sm:h-6" />
             <div>
               <p className="text-[10px] sm:text-xs text-slate-400">
-                <span className="sm:hidden">Agents</span>
-                <span className="hidden sm:inline">Active Agents</span>
+                <span className="sm:hidden">{t('dashboard.agentsShort')}</span>
+                <span className="hidden sm:inline">
+                  {t('dashboard.agents')}
+                </span>
               </p>
               <p className="font-bold text-slate-50">{activeAgents.length}</p>
             </div>
@@ -358,10 +378,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onAttach, onAgentsChange }) => {
       <section>
         <div className="flex justify-between items-center mb-3 sm:mb-6">
           <h2 className="text-base sm:text-xl font-semibold text-slate-300">
-            Registered Hosts & Active Sessions
+            {t('dashboard.section')}
           </h2>
           <span className="hidden sm:inline text-xs text-slate-500 italic">
-            Live telemetry from remote daemons
+            {t('dashboard.live')}
           </span>
         </div>
         <div className="space-y-4 sm:space-y-6">

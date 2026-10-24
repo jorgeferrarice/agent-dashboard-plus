@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 
 /**
  * Displays a colored status badge for an agent session.
@@ -6,13 +7,14 @@ import React from 'react';
  * idle (amber), or default live (green pulse) states.
  */
 const StatusIndicator: React.FC<{ status?: string }> = ({ status }) => {
+  const { t } = useI18n();
   switch (status) {
     case 'working':
       return (
         <div className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 rounded-full border border-green-500/20">
           <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
           <span className="text-green-400 text-[10px] font-bold uppercase tracking-wider">
-            Working
+            {t('status.working')}
           </span>
         </div>
       );
@@ -21,7 +23,7 @@ const StatusIndicator: React.FC<{ status?: string }> = ({ status }) => {
         <div className="flex items-center gap-1 px-2 py-0.5 bg-red-500/15 rounded-full border border-red-500/30 animate-pulse">
           <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
           <span className="text-red-400 text-[10px] font-bold uppercase tracking-wider">
-            Permission
+            {t('status.permission')}
           </span>
         </div>
       );
@@ -30,7 +32,7 @@ const StatusIndicator: React.FC<{ status?: string }> = ({ status }) => {
         <div className="flex items-center gap-1 px-2 py-0.5 bg-amber-500/10 rounded-full border border-amber-500/20">
           <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
           <span className="text-amber-400 text-[10px] font-bold uppercase tracking-wider">
-            Idle
+            {t('status.idle')}
           </span>
         </div>
       );
@@ -39,7 +41,7 @@ const StatusIndicator: React.FC<{ status?: string }> = ({ status }) => {
         <div className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 rounded-full border border-green-500/20">
           <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
           <span className="text-green-400 text-[10px] font-bold uppercase tracking-wider">
-            Live
+            {t('status.live')}
           </span>
         </div>
       );
