@@ -231,6 +231,11 @@ card to make the daemon look again; no restart is needed. You
 can give the button a friendlier name in the host's
 **Settings**.
 
+Only the variant sets the variable. The plain tool always starts
+with it unset, even when the daemon, or the tmux server it runs
+sessions in, inherited a value from an earlier session or your
+shell, so "Claude" never runs on another account.
+
 The rules are declared in the tool's profile:
 
 ```yaml

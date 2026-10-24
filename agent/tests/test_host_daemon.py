@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import subprocess
+from dataclasses import replace
 from unittest.mock import patch, mock_open
 
 import pytest
@@ -1417,6 +1418,75 @@ class TestModelPicker:
             with pytest.raises(ValueError, match="not offered"):
                 asyncio.run(daemon.spawn_agent("id-1", "router", model="evil; rm"))
         fork.assert_not_called()
+
+
+# ── Spawn command line and account environment ─────────────
+
+
+class TestSpawnCommand:
+    """What spawn_agent hands to tmux."""
+
+    @staticmethod
+    def _tmux_argv(daemon, tool, **kwargs):
+        """Runs spawn_agent as the child and returns tmux's argv."""
+        with (
+            patch("agent.host_daemon.pty.fork", return_value=(0, 0)),
+            patch("agent.host_daemon.os.execvpe", side_effect=SystemExit) as execvpe,
+            patch("agent.host_daemon.os._exit"),
+        ):
+            daemon._otlp_ready.set()
+            with pytest.raises(SystemExit):
+                asyncio.run(daemon.spawn_agent("id-1", tool, **kwargs))
+        return execvpe.call_args.args[1]
+
+    def test_default_account_unsets_inherited_config_dir(self, daemon, monkeypatch):
+        """Plain claude never runs on another account's directory
+        left in the daemon's or tmux server's environment."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/home/u/.claude-infinite")
+        argv = self._tmux_argv(daemon, "claude", session_mode="new")
+        assert argv[argv.index("env") + 1 : argv.index("env") + 3] == [
+            "-u",
+            "CLAUDE_CONFIG_DIR",
+        ]
+        assert not any(a.startswith("CLAUDE_CONFIG_DIR=") for a in argv)
+
+    def test_variant_keeps_its_config_dir(self, daemon):
+        """An account variant still gets its own directory."""
+        base = daemon.profiles["claude"]
+        variant = replace(
+            base,
+            name="claude-infinite",
+            env={**base.env, "CLAUDE_CONFIG_DIR": "/home/u/.claude-infinite"},
+        )
+        daemon.profiles[variant.name] = variant
+        argv = self._tmux_argv(daemon, variant.name, session_mode="new")
+        assert "CLAUDE_CONFIG_DIR=/home/u/.claude-infinite" in argv
+        assert "CLAUDE_CONFIG_DIR" not in argv
+
+    def test_user_command_lines_replace_profile(self, daemon):
+        """Settings command lines win; blank keeps the profile's."""
+        cmds = {"new": "claude --model 'opus 4'", "resume": " "}
+        argv = self._tmux_argv(daemon, "claude", session_mode="new", commands=cmds)
+        assert argv[-3:] == ["claude", "--model", "opus 4"]
+        argv = self._tmux_argv(daemon, "claude", session_mode="resume", commands=cmds)
+        assert argv[-3:] == daemon.profiles["claude"].commands.resume
+
+    def test_bad_quoting_fails_before_spawn(self, daemon):
+        """An unclosed quote is refused before anything runs."""
+        with patch("agent.host_daemon.pty.fork") as fork:
+            with pytest.raises(ValueError):
+                asyncio.run(
+                    daemon.spawn_agent("id-1", "claude", commands={"new": "claude '"})
+                )
+        fork.assert_not_called()
+
+    def test_tool_info_reports_default_commands(self, daemon):
+        """The UI is told the profile's command lines."""
+        info = daemon._make_tool_info(daemon.profiles["claude"])
+        assert info["commands"] == {
+            "new": "claude",
+            "resume": "bash -c 'claude --continue || claude'",
+        }
 
 
 # ── Tool detection and per-account variants ─────────────────

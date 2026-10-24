@@ -154,6 +154,10 @@ def probe_usage(profile: AgentProfile, probe_dir: str, timeout: float = 45) -> l
     cfg = profile.config_dirs
     if cfg and cfg.env in profile.env:
         env[cfg.env] = profile.env[cfg.env]
+    elif cfg and cfg.env:
+        # The default account: never one inherited from the
+        # daemon's own environment.
+        env.pop(cfg.env, None)
 
     # A tmux server of its own, on a socket in a private folder
     # that is removed afterwards.

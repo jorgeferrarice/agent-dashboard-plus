@@ -14,6 +14,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import struct
@@ -442,6 +443,7 @@ class HostDaemon:
             cols = data.get("cols", 120)
             rows = data.get("rows", 40)
             model = data.get("model")
+            commands = data.get("commands") or {}
             try:
                 await self.spawn_agent(
                     agent_id,
@@ -453,6 +455,7 @@ class HostDaemon:
                     cols,
                     rows,
                     model,
+                    commands,
                 )
             except Exception as e:
                 log.info(f"Failed to spawn agent {agent_id}: {e}")
@@ -865,6 +868,12 @@ class HostDaemon:
             # The tool has plan limits (a usage section in its
             # profile), whether or not they can be read.
             "has_limits": profile.usage is not None,
+            # Default command lines, shown in the host's
+            # Settings next to the user's own.
+            "commands": {
+                "new": shlex.join(profile.commands.new or [profile.name]),
+                "resume": shlex.join(profile.commands.resume),
+            },
         }
         # Tools with a model picker also report the names the
         # user may choose from. The list is remembered so a
@@ -1201,6 +1210,7 @@ class HostDaemon:
         cols: int = 120,
         rows: int = 40,
         model: Optional[str] = None,
+        commands: Optional[Dict[str, str]] = None,
     ):
         """Spawns a new process in a pseudo-terminal with environmental context.
 
@@ -1220,11 +1230,25 @@ class HostDaemon:
                    a model picker. Must be one of the names
                    the daemon offered; defaults to the
                    profile's default model.
+            commands: Command lines the user set for this tool
+                      in the host's Settings, as shell-quoted
+                      strings keyed "new" and "resume". A
+                      missing or blank one keeps the profile's
+                      command.
 
         Raises:
             ValueError: If the model is not one the daemon
-                        offered for this tool.
+                        offered for this tool, or a command
+                        line cannot be parsed.
         """
+        # Parse the user's command lines up front so a bad
+        # quote fails the spawn before anything is created.
+        # They run as the daemon user, like the Bash tool.
+        overrides = {
+            mode: shlex.split(line)
+            for mode, line in (commands or {}).items()
+            if mode in ("new", "resume") and line and line.strip()
+        }
         # Resolve the session model before anything is
         # created. The name comes from the UI and is
         # untrusted, so only names this daemon offered are
@@ -1392,14 +1416,15 @@ class HostDaemon:
         # Build command from the agent profile. Resume mode
         # uses a fallback command if defined, otherwise
         # falls back to the new-session command.
+        # Command lines set in the host's Settings replace
+        # the profile's.
         profile = self.profiles.get(tool)
-        if profile:
-            if session_mode == "resume" and profile.commands.resume:
-                cmd = profile.commands.resume
-            else:
-                cmd = profile.commands.new or [tool]
+        new_cmd = overrides.get("new") or (profile and profile.commands.new)
+        resume_cmd = overrides.get("resume") or (profile and profile.commands.resume)
+        if session_mode == "resume" and resume_cmd:
+            cmd = resume_cmd
         else:
-            cmd = [tool]
+            cmd = new_cmd or [tool]
 
         # Patch spawn-time settings files before forking.
         # Some agent tools (e.g. agy) read settings from
@@ -1468,6 +1493,24 @@ class HostDaemon:
                     )
             env.update(model_env)
 
+            # Account directory variables (CLAUDE_CONFIG_DIR,
+            # CODEX_HOME, ...) that this profile does not set
+            # must be unset, not inherited: the tmux server
+            # keeps the environment of the session that
+            # started it, so after a "Claude (infinite)"
+            # session every plain "Claude" session would run
+            # on the infinite account. env(1) -u removes them.
+            unset = sorted(
+                {
+                    p.config_dirs.env
+                    for p in self.profiles.values()
+                    if p.config_dirs and p.config_dirs.env
+                }
+                - set(profile.env if profile else {})
+            )
+            for key in unset:
+                env.pop(key, None)
+
             # Inject sidecar PROMPT_COMMAND if the profile
             # defines one (e.g. bash telemetry collection).
             if profile and profile.sidecar and profile.sidecar.prompt_command:
@@ -1508,6 +1551,8 @@ class HostDaemon:
                 str(rows),
                 "env",
             ]
+            for key in unset:
+                tmux_cmd.extend(["-u", key])
             # Pass all env vars through env(1) so the
             # agent process inherits them inside tmux.
             for k, v in env.items():
