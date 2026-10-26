@@ -300,6 +300,37 @@ export function useDraft(agentId: string) {
   return [text, setText] as const;
 }
 
+const QUEUE_KEY = 'agentDashboard.queue.';
+
+/**
+ * Messages written while Claude works, kept per session in this
+ * browser until they are sent, like the draft.
+ */
+export function useQueue(agentId: string) {
+  const [queue, setQueue] = useState<string[]>(() => {
+    try {
+      const stored = JSON.parse(
+        localStorage.getItem(QUEUE_KEY + agentId) ?? '[]',
+      );
+      return Array.isArray(stored)
+        ? stored.filter((m) => typeof m === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      if (queue.length)
+        localStorage.setItem(QUEUE_KEY + agentId, JSON.stringify(queue));
+      else localStorage.removeItem(QUEUE_KEY + agentId);
+    } catch {
+      // Storage blocked: the queue lasts while the view is open.
+    }
+  }, [agentId, queue]);
+  return [queue, setQueue] as const;
+}
+
 /** A menu on the session's screen: a permission prompt, a
  *  question, trusting a folder. */
 export interface ScreenMenu {

@@ -25,6 +25,14 @@ view you picked, in this browser.
   as a draft in this browser until you send it: switching to the
   terminal, to another tab or reloading the page does not lose
   it. The terminal's touch input bar shares the same draft.
+- **Queue:** a message sent while Claude is working waits in a
+  queue, shown just above the message box with dashed bubbles.
+  When Claude stops (not working, not asking anything), the chat
+  sends the first one; the next waits until Claude has worked on
+  it and stopped again. Each queued message has **Send now** and
+  **Remove from queue**. The queue is kept in this browser, like
+  the draft. Claude counts as working until about 15 seconds after
+  its last output, so a queued message can take that long to go.
 - **Files and images:** the 📎 button, pasting an image, or
   dragging files onto the chat sends them to the session's host.
   Their paths are added to your message, the same as dropping a

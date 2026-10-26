@@ -58,6 +58,9 @@ export const chatEn = {
   'chat.send': 'Send',
   'chat.attach': 'Attach files',
   'chat.stop': 'Stop',
+  'chat.queue': 'Queued: sent when Claude finishes',
+  'chat.sendNow': 'Send now',
+  'chat.unqueue': 'Remove from queue',
   'chat.stopTitle': 'Press Esc in the session',
   'chat.dropFiles': 'Drop files to attach them to the message',
 };
@@ -120,6 +123,9 @@ export const chatPt: Record<keyof typeof chatEn, string> = {
   'chat.send': 'Enviar',
   'chat.attach': 'Anexar arquivos',
   'chat.stop': 'Parar',
+  'chat.queue': 'Na fila: enviadas quando o Claude terminar',
+  'chat.sendNow': 'Enviar agora',
+  'chat.unqueue': 'Tirar da fila',
   'chat.stopTitle': 'Pressiona Esc na sessão',
   'chat.dropFiles': 'Solte arquivos para anexá-los à mensagem',
 };

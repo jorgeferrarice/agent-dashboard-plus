@@ -1,6 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Loader2, ShieldQuestion, Upload } from 'lucide-react';
+import {
+  Clock,
+  Loader2,
+  SendHorizontal,
+  ShieldQuestion,
+  Upload,
+  X,
+} from 'lucide-react';
 import { uploadFile } from '../../api';
 import { useI18n } from '../../i18n';
 import ChatComposer from './ChatComposer';
@@ -23,6 +30,7 @@ import {
   toolSummary,
   uploadErrorText,
   useDraft,
+  useQueue,
 } from './chat';
 
 /** How close to the end (px) still counts as reading the end. */
@@ -30,6 +38,11 @@ const STICK_PX = 80;
 
 /** How often (ms) the terminal's screen is read for a menu. */
 const MENU_POLL_MS = 400;
+
+/** After a queued message is sent, how long (ms) to wait for
+ *  Claude to start working before sending the next one anyway
+ *  (a slash command may finish without any work). */
+const QUEUE_SETTLE_MS = 20_000;
 
 /** Pause (ms) between keys picking a menu option, so the tool
  *  handles each arrow before the next. */
@@ -149,6 +162,10 @@ const ChatView: React.FC<{
   const { t } = useI18n();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useDraft(agentId);
+  const [queue, setQueue] = useQueue(agentId);
+  // When the last queued message went out; 0 once Claude works.
+  const queueSentAt = useRef(0);
+  const [queueTick, setQueueTick] = useState(0);
   const [menu, setMenu] = useState<ScreenMenu | null>(null);
   const [busy, setBusy] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
@@ -222,6 +239,27 @@ const ChatView: React.FC<{
     return () => clearInterval(timer);
   }, [readScreen]);
 
+  // Queued messages go out one at a time, each once Claude has
+  // stopped: not working, not asking anything.
+  useEffect(() => {
+    if (status === 'working') {
+      queueSentAt.current = 0;
+      return;
+    }
+    if (!status || status === 'waiting_permission' || menu || !queue.length)
+      return;
+    const wait = queueSentAt.current + QUEUE_SETTLE_MS - Date.now();
+    if (queueSentAt.current && wait > 0) {
+      // The last one has not started Claude yet: wait for it.
+      const timer = setTimeout(() => setQueueTick((n) => n + 1), wait);
+      return () => clearTimeout(timer);
+    }
+    queueSentAt.current = Date.now();
+    sendPrompt(send, queue[0]);
+    setQueue((shown) => shown.slice(1));
+    atEnd.current = true;
+  }, [status, menu, queue, queueTick, send, setQueue]);
+
   const results = useMemo(() => resultsById(messages), [messages]);
   const items = useMemo(() => buildItems(messages), [messages]);
   const artifacts = useMemo(
@@ -251,7 +289,11 @@ const ChatView: React.FC<{
   };
 
   const submit = () => {
-    sendPrompt(send, text.trim());
+    const value = text.trim();
+    // While Claude works the message waits its turn; Claude gets
+    // it when it stops.
+    if (value && status === 'working') setQueue((shown) => [...shown, value]);
+    else sendPrompt(send, value);
     setText('');
     setSent(true);
     setAnswered(true);
@@ -430,6 +472,49 @@ const ChatView: React.FC<{
           }`}
         >
           {notice.text}
+        </div>
+      )}
+
+      {queue.length > 0 && (
+        <div
+          aria-label={t('chat.queue')}
+          className="shrink-0 border-t border-slate-800 bg-slate-950 px-4 pt-2"
+        >
+          <div className="mx-auto max-w-3xl space-y-1.5">
+            <p className="flex items-center justify-end gap-1.5 text-xs text-slate-400">
+              <Clock size={13} /> {t('chat.queue')}
+            </p>
+            {queue.map((message, i) => (
+              <div key={i} className="flex items-start justify-end gap-1">
+                <p className="max-w-[85%] sm:max-w-[75%] max-h-24 overflow-hidden rounded-2xl rounded-br-md border border-dashed border-accent bg-accent/25 px-3 py-1.5 text-sm text-slate-100 whitespace-pre-wrap break-words">
+                  {message}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    sendPrompt(send, message);
+                    setQueue((shown) => shown.filter((_, j) => j !== i));
+                  }}
+                  aria-label={t('chat.sendNow')}
+                  title={t('chat.sendNow')}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                >
+                  <SendHorizontal size={15} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQueue((shown) => shown.filter((_, j) => j !== i))
+                  }
+                  aria-label={t('chat.unqueue')}
+                  title={t('chat.unqueue')}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

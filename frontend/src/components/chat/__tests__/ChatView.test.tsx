@@ -261,6 +261,57 @@ describe('ChatView', () => {
     expect(screen.getByRole('alert')).toBeTruthy();
   });
 
+  it('queues messages while Claude works and sends them one at a time', () => {
+    vi.useFakeTimers();
+    const chat = (status: string) => (
+      <ChatView
+        agentId="a1"
+        socket={socket as unknown as Socket}
+        status={status}
+        send={send}
+        onShowTerminal={onShowTerminal}
+      />
+    );
+    const view = render(chat('working'));
+    const field = screen.getByLabelText('Message to Claude');
+    for (const value of ['primeira', 'segunda']) {
+      fireEvent.change(field, { target: { value } });
+      fireEvent.keyDown(field, { key: 'Enter' });
+    }
+    expect(send).not.toHaveBeenCalled();
+    const queue = screen.getByLabelText('Queued: sent when Claude finishes');
+    expect(within(queue).getByText('primeira')).toBeTruthy();
+    expect(within(queue).getByText('segunda')).toBeTruthy();
+
+    // Claude stops: the first goes, the second waits for Claude
+    // to work on it and stop again.
+    view.rerender(chat('idle'));
+    act(() => vi.advanceTimersByTime(100));
+    expect(send.mock.calls).toEqual([['primeira'], ['\r']]);
+    view.rerender(chat('working'));
+    view.rerender(chat('idle'));
+    act(() => vi.advanceTimersByTime(100));
+    expect(send).toHaveBeenLastCalledWith('\r');
+    expect(send).toHaveBeenCalledWith('segunda');
+    expect(
+      screen.queryByLabelText('Queued: sent when Claude finishes'),
+    ).toBeNull();
+  });
+
+  it('a queued message can be removed or sent now', () => {
+    renderChat('working');
+    const field = screen.getByLabelText('Message to Claude');
+    for (const value of ['tirar', 'já']) {
+      fireEvent.change(field, { target: { value } });
+      fireEvent.keyDown(field, { key: 'Enter' });
+    }
+    fireEvent.click(screen.getAllByLabelText('Remove from queue')[0]);
+    expect(screen.queryByText('tirar')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Send now'));
+    expect(send).toHaveBeenCalledWith('já');
+    expect(screen.queryByText('já')).toBeNull();
+  });
+
   it('shows working only after the user sends something', () => {
     renderChat('working');
     expect(screen.queryByRole('status')).toBeNull();
