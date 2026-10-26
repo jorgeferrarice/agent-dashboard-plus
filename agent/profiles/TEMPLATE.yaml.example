@@ -155,6 +155,13 @@ auth:
 #   "~/.myagent/settings.json":
 #     allowNonWorkspaceAccess: false
 
+# ── Chat view ────────────────────────────────────────
+# Shows sessions as a chat in the dashboard by reading the
+# tool's own conversation log (docs/chat.md). Only "claude"
+# is understood for now; leave it out for other tools.
+
+# chat: claude
+
 # ── Provisioning ─────────────────────────────────────
 # Build-time metadata used by generate_containerfile.py
 # to produce the Containerfile, and as documentation for

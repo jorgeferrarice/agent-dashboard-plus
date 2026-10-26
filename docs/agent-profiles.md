@@ -56,7 +56,8 @@ commands:
 | `binary` | string | no | `""` | CLI binary name. The tool is available on a host when this binary is on the daemon's `PATH`. |
 | `always_available` | bool | no | `false` | If true, skip binary and auth checks — always show as available (e.g., `bash`). |
 | `env` | map | no | `{}` | Environment variables injected at agent spawn time. Values support `{otlp_port}` and `{agent_id}` placeholders. |
-| `permission_patterns` | list | no | `[]` | Regex patterns (case-insensitive) for detecting permission prompts in terminal output. Merged with built-in defaults (`Y/n`, `yes/no`, `Continue?`, etc.). |
+| `permission_patterns` | list | no | `[]` | Regex patterns (case-insensitive) for detecting permission prompts in terminal output. Merged with built-in defaults (`Y/n`, `yes/no`, `Continue?`, etc.). The session shows as waiting for permission when the output goes quiet for 2 seconds right after a match; a match followed by more output is dropped. Avoid patterns that also show up in normal output (such as `☐`, used by Claude's to-do lists). |
+| `chat` | string | no | — | Turns on the [chat view](chat.md) and names the format of the tool's conversation log the daemon reads. Only `claude` exists. Account variants inherit it. |
 
 #### `commands`
 

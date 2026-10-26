@@ -159,6 +159,9 @@ export interface Agent {
     last_exit_code?: number;
     last_cmd?: string;
     worktree_path?: string;
+    /** Set when the session has a chat view: the transcript
+     *  format the host daemon reads (e.g. "claude"). */
+    chat?: string;
   };
 }
 
@@ -294,6 +297,14 @@ export const uploadFile = async (
   const response = await api.post(`/agents/${agentId}/files`, form);
   return response.data.path;
 };
+
+/**
+ * Address of an image or video of a session, for `<img>` and
+ * `<video>`: an image of the agent's transcript ("t:...") or a
+ * file path on the session's host (relative to its folder).
+ */
+export const mediaUrl = (agentId: string, src: string): string =>
+  `${baseURL}/agents/${encodeURIComponent(agentId)}/media?src=${encodeURIComponent(src)}`;
 
 export interface AgentDetail extends Agent {
   host_name: string;

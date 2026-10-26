@@ -8,14 +8,18 @@
  * `t(key, { name })`.
  */
 
+import { chatEn, chatPt } from './messages/chat';
 import { coreEn, corePt } from './messages/core';
 import { dashboardEn, dashboardPt } from './messages/dashboard';
+import { gitEn, gitPt } from './messages/git';
 import { tasksEn, tasksPt } from './messages/tasks';
 import { terminalEn, terminalPt } from './messages/terminal';
 
 export const en = {
+  ...chatEn,
   ...coreEn,
   ...dashboardEn,
+  ...gitEn,
   ...tasksEn,
   ...terminalEn,
 };
@@ -23,8 +27,10 @@ export const en = {
 export type Messages = Record<keyof typeof en, string>;
 
 export const pt: Messages = {
+  ...chatPt,
   ...corePt,
   ...dashboardPt,
+  ...gitPt,
   ...tasksPt,
   ...terminalPt,
 };

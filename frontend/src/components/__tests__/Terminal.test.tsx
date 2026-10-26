@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from '@testing-library/react';
 import type { Socket } from 'socket.io-client';
 
 // xterm needs a real layout engine; the drop zone does not.
@@ -7,7 +13,9 @@ vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
-    buffer = { active: { viewportY: 0, baseY: 0, length: 0 } };
+    buffer = {
+      active: { viewportY: 0, baseY: 0, length: 0, getLine: () => undefined },
+    };
     loadAddon = vi.fn();
     open = vi.fn();
     focus = vi.fn();
@@ -28,8 +36,12 @@ vi.mock('@xterm/addon-fit', () => ({
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 
 const uploadFile = vi.fn();
+const getAgentDetails = vi.fn<(...args: unknown[]) => Promise<unknown>>(
+  () => new Promise(() => {}),
+);
 vi.mock('../../api', () => ({
-  getAgentDetails: vi.fn(() => new Promise(() => {})),
+  getAgentDetails: (...args: unknown[]) => getAgentDetails(...args),
+  mediaUrl: (agentId: string, src: string) => `/media/${agentId}/${src}`,
   getCompanions: vi.fn(() => Promise.resolve([])),
   spawnAgent: vi.fn(),
   stopAgent: vi.fn(),
@@ -157,5 +169,79 @@ describe('Terminal file drop', () => {
       'terminal_input',
       expect.anything(),
     );
+  });
+});
+
+describe('Terminal chat view', () => {
+  const withChat = (chat?: string) =>
+    getAgentDetails.mockResolvedValue({
+      agent_id: 'a1',
+      host_id: 1,
+      host_name: 'h',
+      tool_name: 'claude',
+      telemetry: chat ? { chat } : {},
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Node's own localStorage global shadows jsdom's and is
+    // unusable without a backing file: use an in-memory one.
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    });
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  it('opens on the chat and remembers the terminal when picked', async () => {
+    withChat('claude');
+    const { unmount } = render(
+      <Terminal
+        agentId="a1"
+        onClose={() => {}}
+        socket={socket as unknown as Socket}
+      />,
+    );
+    expect(await screen.findByLabelText('Message to Claude')).toBeTruthy();
+    expect(screen.queryByLabelText('Message to the session')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    expect(screen.queryByLabelText('Message to Claude')).toBeNull();
+    expect(screen.getByLabelText('Message to the session')).toBeTruthy();
+    expect(localStorage.getItem('agentDashboard.view.a1')).toBe('terminal');
+    unmount();
+
+    render(
+      <Terminal
+        agentId="a1"
+        onClose={() => {}}
+        socket={socket as unknown as Socket}
+      />,
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Chat', pressed: false }),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText('Message to Claude')).toBeNull();
+  });
+
+  it('has no chat for a session without a transcript', async () => {
+    withChat();
+    render(
+      <Terminal
+        agentId="a1"
+        onClose={() => {}}
+        socket={socket as unknown as Socket}
+      />,
+    );
+    await waitFor(() => expect(getAgentDetails).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Chat' })).toBeNull();
+    expect(screen.getByLabelText('Message to the session')).toBeTruthy();
   });
 });

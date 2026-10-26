@@ -16,6 +16,7 @@ import {
   Copy,
   X,
   Upload,
+  MessageSquare,
 } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
 import type { AgentDetail, Agent, ToolInfo } from '../api';
@@ -30,7 +31,16 @@ import {
 import { getToolColorsByKeyword } from './dashboard/utils';
 import { openTerminalWindow } from './terminalWindow';
 import { useI18n } from '../i18n';
-import type { I18n, MessageKey } from '../i18n';
+import type { MessageKey } from '../i18n';
+import { getSocket } from '../socket';
+import ChatView from './chat/ChatView';
+import {
+  MAX_UPLOAD_MB,
+  droppedFiles,
+  sendPrompt,
+  useDraft,
+  uploadErrorText,
+} from './chat/chat';
 
 interface TerminalProps {
   agentId: string;
@@ -81,27 +91,22 @@ const TOOL_LABELS: Record<Exclude<ToolCategory, 'unknown'>, string> = {
   bash: 'Bash',
 };
 
-/** Largest file a session accepts. Keep in sync with
- *  MAX_UPLOAD_BYTES in backend/app/main.py. */
-const MAX_UPLOAD_MB = 90;
-
-/** Why an upload failed, in words the user can act on. */
-function uploadErrorText(err: unknown, t: I18n['t']): string {
-  const res = (
-    err as { response?: { status?: number; data?: { detail?: unknown } } }
-  ).response;
-  if (typeof res?.data?.detail === 'string') return res.data.detail;
-  if (res?.status === 413)
-    return t('terminal.uploadTooLarge', { mb: MAX_UPLOAD_MB });
-  if (res?.status) return t('terminal.uploadStatus', { status: res.status });
-  // No answer at all: the browser could not read the item
-  // (a folder, or a file it has no access to) or the
-  // connection dropped.
-  return t('terminal.uploadUnreadable');
-}
-
 /** Whether the primary input is a finger. */
 const isTouch = () => !!window.matchMedia?.('(pointer: coarse)').matches;
+
+type View = 'chat' | 'terminal';
+const VIEW_KEY = 'agentDashboard.view.';
+
+/** The view the user last picked for a session; chat by default. */
+function savedView(agentId: string): View {
+  try {
+    return localStorage.getItem(VIEW_KEY + agentId) === 'terminal'
+      ? 'terminal'
+      : 'chat';
+  } catch {
+    return 'chat';
+  }
+}
 
 /** Keys a phone keyboard lacks, as sent to the PTY. `title` is
  *  the key's name (also the React key); `name` translates it
@@ -134,22 +139,16 @@ const MOBILE_KEYS: {
  * empty field presses Enter.
  */
 const MobileInputBar: React.FC<{
+  agentId: string;
   send: (input: string) => void;
   onShowText: () => void;
-}> = ({ send, onShowText }) => {
+}> = ({ agentId, send, onShowText }) => {
   const { t } = useI18n();
-  const [text, setText] = useState('');
+  // Shared with the chat's box: switching views keeps the text.
+  const [text, setText] = useDraft(agentId);
   const submit = () => {
-    if (text) {
-      // Multi-line text goes as one bracketed paste so each
-      // newline is not taken as Enter. Enter follows on its
-      // own so the agent does not fold it into the paste.
-      send(text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text);
-      setTimeout(() => send('\r'), 80);
-      setText('');
-    } else {
-      send('\r');
-    }
+    sendPrompt(send, text);
+    setText('');
   };
   return (
     <div className="hidden pointer-coarse:block shrink-0 bg-slate-900 border-t border-slate-700">
@@ -241,6 +240,9 @@ const Terminal: React.FC<TerminalProps> = ({
   const [spawning, setSpawning] = useState(false);
   // The screen as plain text, shown for touch selection.
   const [screenText, setScreenText] = useState<string | null>(null);
+  // Chat or terminal. The terminal stays mounted under the chat,
+  // so its size (and the agent's screen) does not change.
+  const [view, setView] = useState<View>(() => savedView(agentId));
 
   // Files dragged over the terminal, and how sending them went.
   const [dragging, setDragging] = useState(false);
@@ -857,6 +859,18 @@ const Terminal: React.FC<TerminalProps> = ({
     setScreenText(lines.join('\n').trimEnd());
   }, []);
 
+  // The rows on screen now (not the scrollback), for the chat
+  // to find a menu to answer.
+  const readScreen = useCallback(() => {
+    const term = xtermRef.current;
+    if (!term) return [];
+    const buf = term.buffer.active;
+    const rows: string[] = [];
+    for (let i = buf.baseY; i < buf.baseY + term.rows; i++)
+      rows.push(buf.getLine(i)?.translateToString(true) ?? '');
+    return rows;
+  }, []);
+
   const sendInput = useCallback(
     (input: string) => {
       socketRef.current?.emit('terminal_input', { target_sid: agentId, input });
@@ -871,14 +885,7 @@ const Terminal: React.FC<TerminalProps> = ({
     async (e: React.DragEvent) => {
       e.preventDefault();
       setDragging(false);
-      // Some drag sources fill only `items`, not `files`.
-      let files = Array.from(e.dataTransfer.files);
-      if (!files.length) {
-        files = Array.from(e.dataTransfer.items ?? [])
-          .filter((item) => item.kind === 'file')
-          .map((item) => item.getAsFile())
-          .filter((file): file is File => !!file);
-      }
+      const files = droppedFiles(e.dataTransfer);
       if (!files.length) {
         console.error('Drop carried no file:', e.dataTransfer.types);
         setUploadStatus({
@@ -919,7 +926,23 @@ const Terminal: React.FC<TerminalProps> = ({
     [agentId, sendInput, t],
   );
 
+  const changeView = useCallback(
+    (next: View) => {
+      setView(next);
+      try {
+        localStorage.setItem(VIEW_KEY + agentId, next);
+      } catch {
+        // Storage blocked: the choice lasts until reload.
+      }
+      if (next === 'terminal' && !isTouch())
+        requestAnimationFrame(() => xtermRef.current?.focus());
+    },
+    [agentId],
+  );
+
   // Derived header values
+  const chatAvailable = !!agentDetail?.telemetry?.chat;
+  const showChat = chatAvailable && view === 'chat';
   const category = categorize(agentDetail?.tool_name);
   const hostName = agentDetail?.host_name;
   const gitProject = agentDetail?.telemetry?.git_project;
@@ -967,7 +990,9 @@ const Terminal: React.FC<TerminalProps> = ({
       {/* Header Bar */}
       <div className="h-11 sm:h-12 flex items-center justify-between gap-2 bg-slate-800 border-b border-slate-700 px-2 sm:px-4 shrink-0 overflow-hidden">
         {/* Left side: tool badge + context */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+        {/* min-w keeps the tool badge in view when the buttons
+            on the right need the room. */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-[4.5rem] flex-1">
           {/* Tool badge */}
           <span
             className={`${toolBadgeColor} text-white text-[10px] font-bold uppercase px-2 py-0.5 rounded tracking-wider shrink-0`}
@@ -1038,41 +1063,79 @@ const Terminal: React.FC<TerminalProps> = ({
           </div>
         </div>
 
-        {/* Right side: companion + close buttons */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {companionButtons.map((btn) => {
-            const existing = companions.find((c) => c.tool_name === btn.tool);
-            return (
-              <button
-                key={btn.tool}
-                onClick={() => handleOpenCompanion(btn.tool)}
-                disabled={spawning}
-                className="shrink-0 flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium disabled:opacity-50"
-                aria-label={
-                  existing
-                    ? t('terminal.attach', { label: btn.label })
-                    : t('terminal.open', { label: btn.label })
-                }
-                title={
-                  existing
-                    ? t('terminal.attachTitle', { label: btn.label })
-                    : t('terminal.openTitle', { label: btn.label })
-                }
-              >
-                {existing ? (
-                  <ExternalLink size={12} />
-                ) : (
-                  <TerminalSquare size={12} />
-                )}
-                <span className="hidden md:inline">
-                  {existing
-                    ? t('terminal.attach', { label: btn.label })
-                    : t('terminal.open', { label: btn.label })}
-                </span>
-                <span className="md:hidden">{btn.label}</span>
-              </button>
-            );
-          })}
+        {/* Right side: view switch, companion + close buttons.
+            On a narrow screen the companion buttons scroll
+            sideways; the switch and Close always show. */}
+        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+          {chatAvailable && (
+            <div
+              role="group"
+              aria-label={t('chat.viewLabel')}
+              className="shrink-0 flex rounded-md border border-slate-600/40 overflow-hidden"
+            >
+              {(['chat', 'terminal'] as const).map((v) => {
+                const label =
+                  v === 'chat' ? t('chat.viewChat') : t('chat.viewTerminal');
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    aria-pressed={view === v}
+                    aria-label={label}
+                    title={label}
+                    onClick={() => changeView(v)}
+                    className={`flex items-center gap-1.5 px-2.5 h-9 pointer-fine:h-auto pointer-fine:py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+                      view === v
+                        ? 'bg-slate-600 text-white'
+                        : 'bg-slate-700/60 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    {v === 'chat' ? (
+                      <MessageSquare size={12} />
+                    ) : (
+                      <TerminalSquare size={12} />
+                    )}
+                    <span className="hidden lg:inline">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 overflow-x-auto [scrollbar-width:none]">
+            {companionButtons.map((btn) => {
+              const existing = companions.find((c) => c.tool_name === btn.tool);
+              return (
+                <button
+                  key={btn.tool}
+                  onClick={() => handleOpenCompanion(btn.tool)}
+                  disabled={spawning}
+                  className="shrink-0 flex items-center gap-1.5 bg-slate-700/60 hover:bg-slate-600 text-slate-200 px-2.5 h-9 pointer-fine:h-auto pointer-fine:py-1.5 rounded-md transition-colors border border-slate-600/40 cursor-pointer text-xs font-medium disabled:opacity-50"
+                  aria-label={
+                    existing
+                      ? t('terminal.attach', { label: btn.label })
+                      : t('terminal.open', { label: btn.label })
+                  }
+                  title={
+                    existing
+                      ? t('terminal.attachTitle', { label: btn.label })
+                      : t('terminal.openTitle', { label: btn.label })
+                  }
+                >
+                  {existing ? (
+                    <ExternalLink size={12} />
+                  ) : (
+                    <TerminalSquare size={12} />
+                  )}
+                  <span className="hidden md:inline">
+                    {existing
+                      ? t('terminal.attach', { label: btn.label })
+                      : t('terminal.open', { label: btn.label })}
+                  </span>
+                  <span className="md:hidden">{btn.label}</span>
+                </button>
+              );
+            })}
+          </div>
 
           {onDetach && (
             // Touch devices have no separate windows.
@@ -1127,6 +1190,17 @@ const Terminal: React.FC<TerminalProps> = ({
             style={{ height: '100%' }}
           />
         </div>
+
+        {showChat && (
+          <ChatView
+            agentId={agentId}
+            socket={sharedSocket ?? getSocket()}
+            status={agentDetail?.telemetry?.agent_status}
+            send={sendInput}
+            readScreen={readScreen}
+            onShowTerminal={() => changeView('terminal')}
+          />
+        )}
 
         {dragging && (
           <div className="absolute inset-1 z-30 flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent bg-black/70 text-slate-100 text-sm pointer-events-none">
@@ -1231,8 +1305,12 @@ const Terminal: React.FC<TerminalProps> = ({
         )}
       </div>
 
-      {!sessionLost && (
-        <MobileInputBar send={sendInput} onShowText={showScreenText} />
+      {!sessionLost && !showChat && (
+        <MobileInputBar
+          agentId={agentId}
+          send={sendInput}
+          onShowText={showScreenText}
+        />
       )}
     </div>
   );

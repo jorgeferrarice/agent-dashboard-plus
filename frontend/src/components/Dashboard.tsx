@@ -18,7 +18,7 @@ import type {
   VersionInfo,
 } from '../api';
 import { normalizeToolInfo } from '../api';
-import { Cpu, Activity, ListTodo } from 'lucide-react';
+import { Cpu, Activity, GitPullRequest, ListTodo } from 'lucide-react';
 import { getSocket } from '../socket';
 import LogoSvg from './LogoSvg';
 import { useI18n } from '../i18n';
@@ -34,12 +34,15 @@ interface DashboardProps {
   onAgentsChange?: (agents: Agent[]) => void;
   /** Opens the Tasks tab. */
   onOpenTasks?: () => void;
+  /** Opens the Git tab. */
+  onOpenGit?: () => void;
 }
 
 const Dashboard: React.FC<DashboardProps> = ({
   onAttach,
   onAgentsChange,
   onOpenTasks,
+  onOpenGit,
 }) => {
   const { t } = useI18n();
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -346,6 +349,15 @@ const Dashboard: React.FC<DashboardProps> = ({
             >
               <ListTodo size={16} className="text-accent" />
               {t('tabs.tasks')}
+            </button>
+          )}
+          {onOpenGit && (
+            <button
+              onClick={onOpenGit}
+              className="shrink-0 flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-200 hover:border-accent-muted hover:text-slate-50"
+            >
+              <GitPullRequest size={16} className="text-accent" />
+              {t('tabs.git')}
             </button>
           )}
         </div>

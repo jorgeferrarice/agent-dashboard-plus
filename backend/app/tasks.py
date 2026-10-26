@@ -19,17 +19,16 @@ for every source: one lists the statuses a task can move to,
 the other moves it.
 """
 
-import asyncio
 import logging
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from . import auth, database, models, providers, secretbox
+from . import auth, connections, database, models, providers, secretbox
 from .providers import huly, jira, shortcut
 
 logger = logging.getLogger(__name__)
@@ -245,8 +244,9 @@ def external_item(row: models.TaskConnection, task: providers.ExternalTask) -> T
     )
 
 
-def open_conn(row: models.TaskConnection) -> providers.Conn:
-    """Decrypts a stored connection for use.
+def open_conn(row: Any) -> providers.Conn:
+    """Decrypts a stored connection for use: a ``TaskConnection``
+    or a ``GitConnection`` (which has no filters).
 
     Raises:
         ProviderError: 400 when the token cannot be decrypted,
@@ -266,7 +266,7 @@ def open_conn(row: models.TaskConnection) -> providers.Conn:
         provider=row.provider,
         config=row.config_json or {},
         secret=secret,
-        filters=row.filters_json or {},
+        filters=getattr(row, "filters_json", None) or {},
     )
 
 
@@ -293,54 +293,28 @@ async def sync_connection(db: Session, row: models.TaskConnection) -> None:
         db: Database session; committed here.
         row: The connection.
     """
-    now = datetime.now(timezone.utc)
-    try:
+
+    async def read(row):
         conn = open_conn(row)
         async with providers.http_client() as http:
-            tasks = await provider_of(row).fetch(conn, http)
-    except providers.ProviderError as e:
-        row.last_error = e.message
-        if e.retry_after:
-            _retry_at[row.id] = now + timedelta(seconds=e.retry_after)
-        logger.warning("Sync of task connection %s failed: %s", row.id, e.message)
-    except Exception:  # pylint: disable=broad-exception-caught
-        # A tracker answering in an unexpected shape must not
-        # stop the other connections from being read.
-        row.last_error = "Unexpected error while reading the tasks."
-        logger.exception("Sync of task connection %s failed", row.id)
-    else:
-        items = [task.model_dump() for task in tasks]
+            return await provider_of(row).fetch(conn, http)
+
+    def store(row, found, now):
+        items = [task.model_dump() for task in found]
         if row.cache is None:
             row.cache = models.TaskCache(items_json=items, synced_at=now)
         else:
             row.cache.items_json = items
             row.cache.synced_at = now
-        row.last_error = None
-    row.last_sync_at = now
-    db.commit()
 
-
-def _utc(value: Optional[datetime]) -> Optional[datetime]:
-    """A stored timestamp as an aware UTC datetime (SQLite gives
-    naive ones back; they were written in UTC)."""
-    if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
+    await connections.sync(db, row, read, store, _retry_at, "the tasks")
 
 
 def due_connections(db: Session, now: datetime) -> List[models.TaskConnection]:
     """Connections whose tasks are older than ``SYNC_INTERVAL``
     and that no tracker asked to wait for."""
-    stale = now - timedelta(seconds=SYNC_INTERVAL)
-    due = []
-    for row in db.query(models.TaskConnection).order_by(models.TaskConnection.id):
-        last = _utc(row.last_sync_at)
-        if last is not None and last > stale:
-            continue
-        if _retry_at.get(row.id, now) > now:
-            continue
-        due.append(row)
-    return due
+    rows = db.query(models.TaskConnection).order_by(models.TaskConnection.id)
+    return connections.due(rows, SYNC_INTERVAL, _retry_at, now)
 
 
 def _snapshot(row: models.TaskConnection) -> tuple:
@@ -352,9 +326,6 @@ def _snapshot(row: models.TaskConnection) -> tuple:
 async def sync_due(notify: Callable[[str], Awaitable[None]]) -> int:
     """Reads every connection that is due, one after the other.
 
-    The database work is synchronous SQLite, short next to the
-    HTTP calls (which are awaited).
-
     Args:
         notify: Called with the email of each user whose board
             changed, to tell their open pages.
@@ -362,26 +333,9 @@ async def sync_due(notify: Callable[[str], Awaitable[None]]) -> int:
     Returns:
         How many connections were read.
     """
-    db = database.SessionLocal()
-    try:
-        rows = due_connections(db, datetime.now(timezone.utc))
-        changed = set()
-        for row in rows:
-            try:
-                before = _snapshot(row)
-                await sync_connection(db, row)
-                if _snapshot(row) != before:
-                    changed.add(row.owner_email)
-            except Exception:  # pylint: disable=broad-exception-caught
-                # E.g. the row was deleted mid-read: skip it, so
-                # the connections after it still get read.
-                db.rollback()
-                logger.exception("Could not save the read of connection %s", row.id)
-        for email in changed:
-            await notify(email)
-        return len(rows)
-    finally:
-        db.close()
+    return await connections.sync_due(
+        due_connections, sync_connection, _snapshot, notify
+    )
 
 
 async def poll_forever(notify: Callable[[str], Awaitable[None]]) -> None:
@@ -391,22 +345,12 @@ async def poll_forever(notify: Callable[[str], Awaitable[None]]) -> None:
     Args:
         notify: As for ``sync_due``.
     """
-    while True:
-        try:
-            await sync_due(notify)
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.exception("Task connection poller failed; retrying")
-        await asyncio.sleep(POLL_TICK)
+    await connections.forever(lambda: sync_due(notify), POLL_TICK, "Task connection")
 
 
 def user_connections(db: Session, email: str) -> List[models.TaskConnection]:
     """The user's connections, oldest first."""
-    return (
-        db.query(models.TaskConnection)
-        .filter(models.TaskConnection.owner_email == email)
-        .order_by(models.TaskConnection.id)
-        .all()
-    )
+    return connections.user_rows(db, models.TaskConnection, email)
 
 
 def own_connection(db: Session, email: str, connection_id: int):
@@ -415,10 +359,7 @@ def own_connection(db: Session, email: str, connection_id: int):
     Raises:
         HTTPException: 404 when it is missing or someone else's.
     """
-    row = db.get(models.TaskConnection, connection_id)
-    if row is None or row.owner_email != email:
-        raise HTTPException(status_code=404, detail="Connection not found")
-    return row
+    return connections.own_row(db, models.TaskConnection, email, connection_id)
 
 
 def cached_items(row: models.TaskConnection) -> List[TaskItem]:
@@ -477,22 +418,10 @@ def _parse_task_id(task_id: str) -> Tuple[str, Optional[int], str]:
     raise HTTPException(status_code=404, detail="Task not found")
 
 
-def http_error(e: providers.ProviderError) -> HTTPException:
-    """The API answer for a tracker's failure."""
-    return HTTPException(status_code=e.status_code, detail=e.message)
-
-
-# What a tracker answering in an unexpected shape (not JSON, a
-# missing key, a wrong type) raises while being read.
-UNEXPECTED = (ValueError, KeyError, TypeError)
-
-
-def unexpected_answer(e: Exception) -> HTTPException:
-    """The API answer for a tracker answer that cannot be read."""
-    logger.warning("Unexpected answer from a tracker: %s", type(e).__name__)
-    return HTTPException(
-        status_code=502, detail="The tracker answered in an unexpected way."
-    )
+# Shared with the connections module; kept here for callers.
+http_error = connections.http_error
+UNEXPECTED = connections.UNEXPECTED
+unexpected_answer = connections.unexpected_answer
 
 
 @router.get("", response_model=List[TaskItem])
@@ -515,14 +444,7 @@ async def list_tasks(
     return await board(db, email)
 
 
-class RefreshRequest(BaseModel):
-    """Which connections to read again.
-
-    Attributes:
-        connection_id: Only this one; every connection when None.
-    """
-
-    connection_id: Optional[int] = None
+RefreshRequest = connections.RefreshRequest
 
 
 @router.post("/refresh", response_model=List[TaskItem])
@@ -539,17 +461,11 @@ async def refresh_tasks(
     Raises:
         HTTPException: 404 for a connection that is not the user's.
     """
-    if body.connection_id is not None:
-        rows = [own_connection(db, email, body.connection_id)]
-    else:
-        rows = user_connections(db, email)
     # A connection read moments ago is not read again, so clicking
     # refresh in a loop cannot keep the trackers busy.
-    recent = datetime.now(timezone.utc) - timedelta(seconds=REFRESH_COOLDOWN)
-    for row in rows:
-        last = _utc(row.last_sync_at)
-        if last is None or last < recent:
-            await sync_connection(db, row)
+    await connections.refresh(
+        db, models.TaskConnection, email, body, sync_connection, REFRESH_COOLDOWN
+    )
     return await board(db, email)
 
 

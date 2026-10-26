@@ -6,91 +6,55 @@ checked against the tracker before it is saved, stored
 encrypted, and never returned by the API.
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import auth, database, models, providers, secretbox, tasks
+from . import auth, connections, database, models, providers, secretbox, tasks
 
 router = APIRouter(prefix="/tasks/connections", tags=["tasks"])
 
 ProviderName = Literal["jira", "shortcut", "huly"]
 
 
-class ConnectionOut(BaseModel):
-    """A connection as the UI sees it: everything but the token.
+class ConnectionOut(connections.ConnectionInfo):
+    """A connection as the UI sees it: everything but the token
+    (see ``ConnectionInfo``), plus:
 
     Attributes:
-        id: Connection ID.
-        provider: jira, shortcut or huly.
-        name: The user's name for it.
-        config: Settings that are not secret (site, email, ...),
-            plus ``account``: who the token belongs to.
         filters: Which tasks it shows.
         mapping: Board column per status name, as the user set it.
-        last_sync_at: When its tasks were last read.
-        last_error: Why the last read failed; None when it worked.
         task_count: How many tasks the last read found.
     """
 
-    id: int
-    provider: str
-    name: str
-    config: Dict[str, Any]
     filters: Dict[str, Any]
     mapping: Dict[str, str]
-    last_sync_at: Optional[datetime] = None
-    last_error: Optional[str] = None
     task_count: int = 0
 
 
-class ConnectionCreate(BaseModel):
+class ConnectionCreate(connections.NewConnection):
     """A new connection."""
 
     provider: ProviderName
-    name: str = Field(..., max_length=60)
-    config: Dict[str, Any] = Field(default_factory=dict)
-    secret: str = Field(..., max_length=4000)
 
 
-class ConnectionChange(BaseModel):
-    """Changes to a connection. Fields left out keep their value;
-    a blank secret keeps the saved one."""
+class ConnectionChange(connections.ConnectionEdit):
+    """Changes to a connection (see ``ConnectionEdit``), plus its
+    filters and status mapping."""
 
-    name: Optional[str] = Field(None, max_length=60)
-    config: Optional[Dict[str, Any]] = None
-    secret: Optional[str] = Field(None, max_length=4000)
     filters: Optional[Dict[str, Any]] = None
     mapping: Optional[Dict[str, str]] = None
 
 
 def _out(row: models.TaskConnection) -> ConnectionOut:
     return ConnectionOut(
-        id=row.id,
-        provider=row.provider,
-        name=row.name,
-        config=row.config_json or {},
+        **connections.info(row),
         filters=row.filters_json or {},
         mapping=row.mapping_json or {},
-        last_sync_at=row.last_sync_at,
-        last_error=row.last_error,
         task_count=len(row.cache.items_json or []) if row.cache else 0,
     )
-
-
-def _clean_name(name: Optional[str]) -> str:
-    """Trims a connection name.
-
-    Raises:
-        HTTPException: 422 when blank.
-    """
-    cleaned = (name or "").strip()
-    if not cleaned:
-        raise HTTPException(status_code=422, detail="Name is required")
-    return cleaned
 
 
 def _clean_mapping(mapping: Dict[str, str]) -> Dict[str, str]:
@@ -142,19 +106,7 @@ async def _verify(provider: str, config: Dict[str, Any], secret: str) -> Dict[st
     module = tasks.PROVIDERS.get(provider)
     if module is None:
         raise HTTPException(status_code=422, detail=f"{provider} is not supported yet")
-    if not secret.strip():
-        raise HTTPException(status_code=422, detail="Token is required")
-    try:
-        cleaned = module.normalize_config(config)
-        conn = providers.Conn(
-            id=0, name="", provider=provider, config=cleaned, secret=secret.strip()
-        )
-        async with providers.http_client() as http:
-            account = await module.check(conn, http)
-    except providers.ProviderError as e:
-        raise tasks.http_error(e) from e
-    except tasks.UNEXPECTED as e:
-        raise tasks.unexpected_answer(e) from e
+    cleaned, account = await connections.verify(module, provider, config, secret)
     return {**cleaned, "account": account}
 
 
@@ -180,21 +132,18 @@ async def create_connection(
         HTTPException: 422 for a blank name or bad settings, 400
             when the tracker rejects the token.
     """
-    name = _clean_name(body.name)
+    connections.clean_name(body.name)
     config = await _verify(body.provider, body.config, body.secret)
-    row = models.TaskConnection(
-        owner_email=email,
-        provider=body.provider,
-        name=name,
-        config_json=config,
-        secret_enc=secretbox.encrypt(body.secret.strip()),
+    row = await connections.create(
+        db,
+        models.TaskConnection,
+        email,
+        body,
+        config,
+        tasks.sync_connection,
         filters_json={},
         mapping_json={},
     )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    await tasks.sync_connection(db, row)
     return _out(row)
 
 
@@ -216,7 +165,7 @@ async def update_connection(
     given = body.model_fields_set
     resync = False
     if "name" in given:
-        row.name = _clean_name(body.name)
+        row.name = connections.clean_name(body.name)
     new_secret = (body.secret or "").strip()
     if ("config" in given and body.config is not None) or new_secret:
         config = body.config if body.config is not None else row.config_json

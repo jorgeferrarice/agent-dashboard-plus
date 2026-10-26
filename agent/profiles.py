@@ -231,6 +231,10 @@ class AgentProfile:
     models: Optional[ModelsConfig] = None
     config_dirs: Optional[ConfigDirsConfig] = None
     usage: Optional[UsageConfig] = None
+    # Format of the conversation log the dashboard's chat view
+    # reads (see agent/transcripts.py); None means the tool has
+    # no chat view, only its terminal. Only "claude" for now.
+    chat: Optional[str] = None
 
     @property
     def is_variant(self) -> bool:
@@ -353,6 +357,9 @@ def _parse_profile(data: dict) -> AgentProfile:
 
     # Spawn settings — JSON files to patch at spawn time
     profile.spawn_settings = data.get("spawn_settings", {})
+
+    # Chat view
+    profile.chat = data.get("chat") or None
 
     # Per-session model picker
     models = data.get("models")

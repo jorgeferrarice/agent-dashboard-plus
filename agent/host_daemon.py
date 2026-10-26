@@ -31,6 +31,7 @@ from typing import Dict, Optional
 import socketio
 from aiohttp import web
 
+from agent import transcripts
 from agent.profiles import discover_variants, load_profiles, profile_logged_in
 from agent.usage_probe import ProbeError, probe_usage
 
@@ -76,6 +77,34 @@ _PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 # Largest file the UI may send to a session. Keep in sync with
 # MAX_UPLOAD_BYTES in backend/app/main.py.
 MAX_UPLOAD_BYTES = 90 * 1024 * 1024
+
+# Largest piece of an image or video sent to the UI at once
+# (the UI asks for the rest with HTTP Range requests). Must stay
+# under the hub's Socket.IO message limit (socket.py).
+MEDIA_CHUNK_BYTES = 8 * 1024 * 1024
+
+# Seconds between checks of the chat view's transcripts.
+CHAT_POLL_SECONDS = 0.5
+
+# Variables Claude Code sets for the commands it runs. A daemon
+# started from inside a Claude Code session (or a tmux server
+# started there) would pass them on, and every Claude session it
+# spawns would then think it is a child session: it stops saving
+# its transcript, which leaves the chat view empty. They are
+# never inherited.
+_PARENT_SESSION_VARS = frozenset(
+    {
+        "CLAUDECODE",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PID",
+    }
+)
 
 # Seconds to wait for a profile's model list endpoint.
 _MODEL_LIST_TIMEOUT = 5
@@ -126,6 +155,10 @@ _STARTUP_BUFFER_SECS = 0.5
 # competing with incoming writes from the agent's
 # SIGWINCH redraw and tmux's reflow output.
 _RESIZE_PAUSE_SECS = 0.3
+
+# Seconds between attempts to reach a hub that is down or
+# still starting when the daemon starts.
+HUB_RETRY_SECONDS = 5
 
 
 def _split_utf8(data: bytes) -> tuple:
@@ -359,6 +392,57 @@ class HostDaemon:
                 log.info(f"Failed to save uploaded file: {e}")
                 return {"ok": False, "error": "Could not save the file."}
             return {"ok": True, "path": path}
+
+        @self.sio.on("chat_history", namespace="/terminal")
+        async def on_chat_history(data):
+            """Sends a session's whole conversation to a chat
+            view that just opened.
+
+            data: {'agent_id': '...', 'requester': '<sid>'}
+
+            A session without a chat view, or whose conversation
+            was not found yet, gets an empty list, so the view
+            stops waiting.
+            """
+            data = data or {}
+            agent_id = data.get("agent_id")
+            if not agent_id:
+                return
+            chat = (self.agents.get(agent_id) or {}).get("chat") or {}
+            reader = chat.get("reader")
+            await self._send_chat(
+                agent_id,
+                list(reader.messages) if reader else [],
+                replace=True,
+                requester=data.get("requester"),
+            )
+
+        @self.sio.on("read_media", namespace="/terminal")
+        async def on_read_media(data):
+            """Reads an image or video the chat view shows.
+
+            data: {'agent_id': '...', 'src': '<path or t:...>',
+            'offset': <int>, 'length': <int>}
+
+            Returns:
+                Acknowledgement dict: {'ok': True, 'mime': ...,
+                'size': <whole file>, 'data': <bytes from
+                offset>} or {'ok': False, 'error': '...'}.
+            """
+            data = data or {}
+            try:
+                return await asyncio.to_thread(
+                    self.read_media,
+                    data.get("agent_id"),
+                    str(data.get("src") or ""),
+                    int(data.get("offset") or 0),
+                    int(data.get("length") or MEDIA_CHUNK_BYTES),
+                )
+            except (ValueError, TypeError) as e:
+                return {"ok": False, "error": str(e)}
+            except OSError as e:
+                log.info(f"Failed to read media: {e}")
+                return {"ok": False, "error": "Could not read the file."}
 
         @self.sio.on("list_models", namespace="/terminal")
         async def on_list_models(data):
@@ -693,6 +777,133 @@ class HostDaemon:
     def _upload_dir(self, agent_id: str) -> str:
         """Returns the folder holding files sent to one session."""
         return os.path.join(tempfile.gettempdir(), "agent-dashboard-uploads", agent_id)
+
+    def read_media(self, agent_id, src: str, offset: int, length: int) -> dict:
+        """Reads part of an image or video for the chat view.
+
+        ``src`` is either an image stored in the session's
+        transcript (``t:...``, see ``transcripts.image_at``) or
+        a file path, absolute or relative to the session's
+        working directory. Files are only served when they are
+        images or videos inside the session's folders (see
+        ``transcripts.media_path``).
+
+        Args:
+            agent_id: The session.
+            src: What to read.
+            offset: First byte to send.
+            length: How many bytes, at most ``MEDIA_CHUNK_BYTES``.
+
+        Returns:
+            {'ok': True, 'mime', 'size', 'data'}.
+
+        Raises:
+            ValueError: Unknown session, or a file that may not
+                be shown.
+            OSError: The file cannot be read.
+        """
+        info = self.agents.get(agent_id)
+        if not info:
+            raise ValueError("Session not found.")
+        length = min(max(length, 0), MEDIA_CHUNK_BYTES)
+        if src.startswith("t:"):
+            reader = (info.get("chat") or {}).get("reader")
+            if not reader:
+                raise ValueError("Image not found.")
+            mime, data = transcripts.image_at(reader.path, src)
+            start = max(offset, 0)
+            return {
+                "ok": True,
+                "mime": mime,
+                "size": len(data),
+                "data": data[start : start + length],
+            }
+        cwd = info.get("cwd") or os.getcwd()
+        roots = [
+            cwd,
+            info.get("original_project_dir"),
+            self._upload_dir(agent_id),
+            tempfile.gettempdir(),
+            "/tmp",
+        ]
+        path, mime = transcripts.media_path(src, cwd, roots)
+        size, data = transcripts.read_slice(path, offset, length)
+        return {"ok": True, "mime": mime, "size": size, "data": data}
+
+    async def _send_chat(self, agent_id, messages, replace=False, requester=None):
+        """Sends chat messages to a session's chat viewers.
+
+        Large conversations go in several Socket.IO messages;
+        only the first one replaces what the viewer had.
+
+        Args:
+            agent_id: The session.
+            messages: Normalized messages (see ``transcripts``).
+            replace: Whether they are the whole conversation.
+            requester: Send to this viewer only (a chat view
+                that just opened) instead of every viewer.
+        """
+        if not self.sio.connected:
+            return
+        for i, group in enumerate(transcripts.batches(messages)):
+            payload = {
+                "agent_id": agent_id,
+                "messages": group,
+                "replace": replace and i == 0,
+            }
+            if requester:
+                payload["requester"] = requester
+            await self.sio.emit("chat_messages", payload, namespace="/terminal")
+
+    def _note_chat_session(self, agent_id, attrs):
+        """Remembers which conversation a session is in.
+
+        Claude Code tags its telemetry with ``session.id``, the
+        name of its transcript file. A new ID (the first prompt,
+        or ``/clear``) makes ``watch_chats`` switch files.
+        """
+        chat = (self.agents.get(agent_id) or {}).get("chat")
+        session_id = attrs.get("session.id")
+        if chat is not None and isinstance(session_id, str) and session_id:
+            chat["session_id"] = session_id
+
+    async def watch_chats(self):
+        """Follows the transcripts of sessions with a chat view
+        and sends what is new to their viewers.
+
+        When telemetry names a conversation other than the one
+        being read, its file is looked up and the viewers get
+        the whole new conversation (``replace``).
+        """
+        while self.running:
+            for agent_id, info in list(self.agents.items()):
+                chat = info.get("chat")
+                if not chat:
+                    continue
+                reader = chat.get("reader")
+                session_id = chat.get("session_id")
+                replace = False
+                if session_id and (reader is None or reader.session_id != session_id):
+                    path = transcripts.find_transcript(chat["root"], session_id)
+                    if path and (reader is None or reader.path != path):
+                        reader = transcripts.TranscriptReader(path, session_id)
+                        chat["reader"] = reader
+                        replace = True
+                    elif path:
+                        # The file guessed at resume was the right one.
+                        reader.session_id = session_id
+                if reader is None:
+                    continue
+                try:
+                    new = await asyncio.to_thread(reader.read_new)
+                except OSError as e:
+                    log.info(f"Could not read the transcript of {agent_id}: {e}")
+                    continue
+                if replace:
+                    await self._send_chat(agent_id, list(reader.messages), replace=True)
+                elif new:
+                    await self._send_chat(agent_id, new)
+            await asyncio.sleep(CHAT_POLL_SECONDS)
 
     def save_upload(self, agent_id, name, data) -> str:
         """Saves a file sent from the UI where the session can read it.
@@ -1426,6 +1637,25 @@ class HostDaemon:
         else:
             cmd = new_cmd or [tool]
 
+        # Chat view: the tool keeps its conversation in a file
+        # under its configuration directory (see
+        # agent/transcripts.py). Which file is known once its
+        # telemetry names the session (_note_chat_session).
+        chat_state = None
+        if profile and profile.chat == "claude" and full_path:
+            cfg = profile.config_dirs
+            config_dir = (cfg and profile.env.get(cfg.env)) or os.path.expanduser(
+                (cfg and cfg.default) or "~/.claude"
+            )
+            chat_state = {"root": config_dir, "session_id": None, "reader": None}
+            telemetry["chat"] = profile.chat
+            if session_mode == "resume":
+                # --continue resumes the folder's newest
+                # conversation: show it until telemetry says.
+                guess = transcripts.latest_transcript(config_dir, full_path)
+                if guess:
+                    chat_state["reader"] = transcripts.TranscriptReader(guess)
+
         # Patch spawn-time settings files before forking.
         # Some agent tools (e.g. agy) read settings from
         # JSON config files at startup, and those files
@@ -1501,11 +1731,14 @@ class HostDaemon:
             # session every plain "Claude" session would run
             # on the infinite account. env(1) -u removes them.
             unset = sorted(
-                {
-                    p.config_dirs.env
-                    for p in self.profiles.values()
-                    if p.config_dirs and p.config_dirs.env
-                }
+                (
+                    {
+                        p.config_dirs.env
+                        for p in self.profiles.values()
+                        if p.config_dirs and p.config_dirs.env
+                    }
+                    | _PARENT_SESSION_VARS
+                )
                 - set(profile.env if profile else {})
             )
             for key in unset:
@@ -1591,6 +1824,8 @@ class HostDaemon:
                 "worktree_path": worktree_path,
                 "worktree_branch": worktree_branch,
                 "original_project_dir": original_project_dir,
+                "cwd": full_path,
+                "chat": chat_state,
             }
             if self.sio.connected:
                 await self.sio.emit(
@@ -1701,13 +1936,9 @@ class HostDaemon:
                         # Only run the expensive regex+search
                         # when the chunk contains a newline
                         # (prompts always end with one).
-                        now = time.monotonic()
-                        if "\n" in decoded_data or "?" in decoded_data:
-                            stripped = _ANSI_ESCAPE.sub("", decoded_data)
-                            if any(
-                                p.search(stripped) for p in self.permission_patterns
-                            ):
-                                info["permission_candidate"] = now
+                        self._note_permission_prompt(
+                            info, decoded_data, time.monotonic()
+                        )
                         # New output clears permission_waiting
                         # since the agent is actively producing
                         # output (not waiting for input).
@@ -2167,6 +2398,7 @@ class HostDaemon:
                         attrs = self._process_otel_attributes(
                             record.get("attributes", [])
                         )
+                        self._note_chat_session(agent_id, attrs)
                         if self._update_telemetry_from_attrs(tel, attrs):
                             changed = True
 
@@ -2282,6 +2514,7 @@ class HostDaemon:
                             dp_attrs = self._process_otel_attributes(
                                 dp.get("attributes", [])
                             )
+                            self._note_chat_session(agent_id, dp_attrs)
 
                             # Model detection from any metric with a
                             # 'model' attribute. GenAI conventions
@@ -2432,6 +2665,38 @@ class HostDaemon:
         await site.start()
         self._otlp_ready.set()
         log.info(f"OTLP Receiver listening on " f"http://127.0.0.1:{self.otlp_port}")
+
+    def _note_permission_prompt(self, info, text, now):
+        """Marks or clears a permission prompt candidate from output.
+
+        A chunk that matches a permission pattern marks a candidate;
+        update_agent_status promotes it once the output stays quiet.
+        Output that keeps coming after the prompt was drawn, without
+        a match, means the prompt is gone (answered, or the match was
+        a menu or a list in Claude's own text). Without clearing it,
+        an old match turned every later pause into a false
+        "waiting for permission".
+
+        Args:
+            info: The agent's state dict.
+            text: The decoded output chunk.
+            now: The current time.monotonic().
+        """
+        try:
+            # Prompts end with a newline or a question mark: skip
+            # the regexes on other chunks (spinner frames).
+            if "\n" in text or "?" in text:
+                stripped = _ANSI_ESCAPE.sub("", text)
+                if any(p.search(stripped) for p in self.permission_patterns):
+                    info["permission_candidate"] = now
+                    return
+            candidate = info.get("permission_candidate", 0)
+            # A prompt is drawn in one burst: output past the idle
+            # window is something else.
+            if candidate and now - candidate >= PERMISSION_IDLE_SECONDS:
+                info["permission_candidate"] = 0
+        except Exception:
+            log.exception("Permission prompt check failed")
 
     async def update_agent_status(self):
         """Periodically derives agent_status from OTLP and output activity.
@@ -2596,14 +2861,40 @@ class HostDaemon:
             log.info(f"Restarting '{name}' in 5 seconds...")
             await asyncio.sleep(5)
 
+    async def _connect_to_hub(self):
+        """Connects to the hub, retrying until it answers.
+
+        The hub may be down or still starting (a restart, the
+        Podman VM booting after a reboot). Exiting on the first
+        failure made the service manager restart the daemon over
+        and over; on the dashboard machine each restart also ran
+        ``podman machine start`` and ``compose up`` again. Once
+        connected, Socket.IO reconnects by itself after a drop.
+
+        Returns without connecting if the daemon is stopped
+        while waiting.
+        """
+        while self.running:
+            try:
+                await self.sio.connect(
+                    self.server_url,
+                    namespaces=["/terminal"],
+                    headers={"X-Host-Token": self.host_token},
+                )
+                return
+            except socketio.exceptions.ConnectionError as e:
+                log.info(
+                    f"Cannot reach the dashboard at {self.server_url}: {e}."
+                    f" Retrying in {HUB_RETRY_SECONDS} seconds."
+                )
+                await asyncio.sleep(HUB_RETRY_SECONDS)
+
     async def run(self):
         """Connects to the hub and starts all background tasks."""
         try:
-            await self.sio.connect(
-                self.server_url,
-                namespaces=["/terminal"],
-                headers={"X-Host-Token": self.host_token},
-            )
+            await self._connect_to_hub()
+            if not self.running:
+                return
             # Start background tasks with error recovery.
             # Each task is wrapped in _run_task so a failure
             # in one doesn't crash the entire daemon. The
@@ -2627,6 +2918,9 @@ class HostDaemon:
             self.usage_task = asyncio.create_task(
                 self._run_task("usage", self.update_usage)
             )
+            self.chat_task = asyncio.create_task(
+                self._run_task("chat", self.watch_chats)
+            )
 
             await asyncio.gather(
                 self.watcher_task,
@@ -2636,6 +2930,7 @@ class HostDaemon:
                 self.status_task,
                 self.flush_task,
                 self.usage_task,
+                self.chat_task,
             )
         except asyncio.CancelledError:
             pass
@@ -2666,6 +2961,7 @@ class HostDaemon:
             "status_task",
             "flush_task",
             "usage_task",
+            "chat_task",
         ):
             task = getattr(self, name, None)
             if task and not task.done():

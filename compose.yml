@@ -22,6 +22,9 @@ services:
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
       - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL}
+      # Git tab: Review PR calls the Claude API (docs/git.md).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GIT_REVIEW_MODEL=${GIT_REVIEW_MODEL:-}
       # Trust X-Forwarded-Proto from the frontend nginx proxy so
       # OIDC redirect URIs use https. Port 8000 is loopback-only.
       - FORWARDED_ALLOW_IPS=*

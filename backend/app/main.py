@@ -17,13 +17,14 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import models, database, auth, socket, tasks, secretbox, task_connections
+from . import git
 
 # Initialize the database
 models.Base.metadata.create_all(bind=database.engine)
@@ -173,6 +174,7 @@ async def validation_error(_request: Request, exc: RequestValidationError):
 
 fastapi_app.include_router(task_connections.router)
 fastapi_app.include_router(tasks.router)
+fastapi_app.include_router(git.router)
 
 app = socketio.ASGIApp(socket.sio, fastapi_app)
 
@@ -1029,6 +1031,175 @@ async def update_task_description(
 # client_max_body_size in frontend/nginx.conf.
 MAX_UPLOAD_BYTES = 90 * 1024 * 1024
 
+# Largest piece of a file a daemon sends per call; keep in sync
+# with MEDIA_CHUNK_BYTES in agent/host_daemon.py.
+MEDIA_CHUNK_BYTES = 8 * 1024 * 1024
+
+# Headers of every image or video the chat view gets. The type
+# comes from the file's extension and is not guessed again; an
+# SVG opened on its own is sandboxed, so its scripts cannot run
+# as the dashboard.
+MEDIA_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "Cache-Control": "private, no-cache",
+    "Accept-Ranges": "bytes",
+}
+
+# Documents the chat view previews, besides images and videos.
+DOCUMENT_TYPES = ("application/pdf", "text/html")
+
+# An HTML page (a page Claude made) runs its scripts, but in a
+# sandbox without this site's origin: it cannot read the
+# dashboard's cookies or call its API as the user. It may load
+# scripts and styles from the web, as such pages usually do.
+HTML_HEADERS = {
+    **MEDIA_HEADERS,
+    "Content-Security-Policy": (
+        "sandbox allow-scripts allow-popups allow-forms allow-modals; "
+        "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'"
+    ),
+}
+
+
+def _media_headers(mime: str) -> dict:
+    """The response headers for a file of the chat view.
+
+    Args:
+        mime: The file's MIME type.
+
+    Returns:
+        HTML_HEADERS for an HTML page, MEDIA_HEADERS otherwise.
+    """
+    return HTML_HEADERS if mime == "text/html" else MEDIA_HEADERS
+
+
+_RANGE = re.compile(r"bytes=(\d+)-(\d*)")
+
+
+def _daemon_of(db: Session, agent_id: str, offline: str) -> str:
+    """The Socket.IO session of the daemon running a session.
+
+    Args:
+        agent_id: The session.
+        offline: Error message when its host is offline.
+
+    Raises:
+        HTTPException: 404 if the session does not exist, 400 if
+            its host is offline.
+    """
+    db_agent = db.query(models.Agent).filter(models.Agent.agent_id == agent_id).first()
+    if not db_agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    sid = socket.host_sids.get(db_agent.host_id)
+    if not sid:
+        raise HTTPException(status_code=400, detail=offline)
+    return sid
+
+
+async def _read_media(sid: str, agent_id: str, src: str, offset: int, length: int):
+    """Asks a daemon for part of an image or video.
+
+    Returns:
+        The daemon's answer: ``{mime, size, data}``.
+
+    Raises:
+        HTTPException: 404 when the daemon refuses (unknown
+            session, not a media file, outside the session's
+            folders, missing), 502 for an answer that is not
+            media, 504 when it does not answer in time.
+    """
+    try:
+        result = await socket.sio.call(
+            "read_media",
+            {"agent_id": agent_id, "src": src, "offset": offset, "length": length},
+            to=sid,
+            namespace="/terminal",
+            timeout=60,
+        )
+    except socketio.exceptions.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="The host did not send the file."
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = result.get("error") if isinstance(result, dict) else None
+        raise HTTPException(status_code=404, detail=detail or "File not found.")
+    mime = str(result.get("mime") or "")
+    data = result.get("data")
+    media = mime.startswith(("image/", "video/")) or mime in DOCUMENT_TYPES
+    if not media or not isinstance(data, bytes):
+        raise HTTPException(status_code=502, detail="The host sent something else.")
+    return mime, int(result.get("size") or 0), data
+
+
+@fastapi_app.get("/agents/{agent_id}/media")
+async def agent_media(
+    agent_id: str,
+    src: str,
+    request: Request,
+    db: Session = Depends(database.get_db),
+    user: dict = Depends(auth.get_current_user),
+):
+    """An image, video, PDF or HTML page for a session's chat view.
+
+    ``src`` is an image stored in the session's conversation
+    (``t:...``) or a path on the session's host, absolute or
+    relative to its working directory. The daemon only serves
+    images and videos inside the session's folders.
+
+    Browsers ask for videos in pieces (HTTP ``Range``; Safari
+    will not play one otherwise), so a ``Range`` request gets
+    that piece (206), at most ``MEDIA_CHUNK_BYTES``. Without
+    one, the whole file comes back, up to ``MAX_UPLOAD_BYTES``.
+
+    Raises:
+        HTTPException: 404 for an unknown session or a file the
+            daemon will not serve, 400 if the host is offline,
+            413 for a whole file over the limit, 416 for a range
+            past the end, 422 for a bad ``src``, 504 if the
+            daemon does not answer.
+    """
+    if not src or len(src) > 4096:
+        raise HTTPException(status_code=422, detail="Invalid file reference.")
+    sid = _daemon_of(db, agent_id, "Cannot show the file: Host is offline.")
+    match = _RANGE.fullmatch(request.headers.get("range", "").strip())
+    if match:
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start + MEDIA_CHUNK_BYTES - 1
+        if end < start:
+            raise HTTPException(status_code=416, detail="Invalid range.")
+        length = min(max(end - start + 1, 0), MEDIA_CHUNK_BYTES)
+        mime, size, data = await _read_media(sid, agent_id, src, start, length)
+        if start >= size:
+            return Response(
+                status_code=416,
+                headers={**_media_headers(mime), "Content-Range": f"bytes */{size}"},
+            )
+        return Response(
+            content=data,
+            status_code=206,
+            media_type=mime,
+            headers={
+                **_media_headers(mime),
+                "Content-Range": f"bytes {start}-{start + len(data) - 1}/{size}",
+            },
+        )
+    mime, size, data = await _read_media(sid, agent_id, src, 0, MEDIA_CHUNK_BYTES)
+    if size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+    parts = [data]
+    received = len(data)
+    while received < size and data:
+        _, _, data = await _read_media(sid, agent_id, src, received, MEDIA_CHUNK_BYTES)
+        parts.append(data)
+        received += len(data)
+    return Response(
+        content=b"".join(parts), media_type=mime, headers=_media_headers(mime)
+    )
+
 
 @fastapi_app.post("/agents/{agent_id}/files")
 async def upload_agent_file(
@@ -1058,14 +1229,7 @@ async def upload_agent_file(
             413 if the file is too large, 504 if the daemon does
             not answer in time.
     """
-    db_agent = db.query(models.Agent).filter(models.Agent.agent_id == agent_id).first()
-    if not db_agent:
-        raise HTTPException(status_code=404, detail="Agent not found.")
-    sid = socket.host_sids.get(db_agent.host_id)
-    if not sid:
-        raise HTTPException(
-            status_code=400, detail="Cannot send the file: Host is offline."
-        )
+    sid = _daemon_of(db, agent_id, "Cannot send the file: Host is offline.")
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -1219,9 +1383,13 @@ _background_tasks: set = set()
 @fastapi_app.on_event("startup")
 async def start_version_checker():
     """Launches the background GitHub release checker and the
-    poller that keeps the Tasks tab's tracker tasks fresh."""
+    pollers that keep the Tasks tab's tracker tasks and the Git
+    tab's pull requests fresh."""
     asyncio.create_task(_check_latest_release())
     # Keep a reference: the event loop holds tasks only weakly.
     _background_tasks.add(
         asyncio.create_task(tasks.poll_forever(socket.notify_tasks_changed))
+    )
+    _background_tasks.add(
+        asyncio.create_task(git.poll_forever(socket.notify_git_changed))
     )

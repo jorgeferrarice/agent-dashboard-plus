@@ -14,6 +14,7 @@ type DashboardProps = {
   onAttach: (id: string) => void;
   onAgentsChange?: (agents: Agent[]) => void;
   onOpenTasks?: () => void;
+  onOpenGit?: () => void;
 };
 let dashboard: DashboardProps;
 const terminalMounts: string[] = [];
@@ -56,6 +57,9 @@ vi.mock('../Terminal', async () => {
 vi.mock('../tasks/TasksView', () => ({
   default: () => <div>tasks-board</div>,
 }));
+vi.mock('../git/GitView', () => ({
+  default: () => <div>git-lists</div>,
+}));
 const renamed: [string, string][] = [];
 // What the server holds as the user's open tabs.
 const server: { tabs: string[] | null } = { tabs: null };
@@ -78,6 +82,13 @@ vi.mock('../../socket', () => ({
     },
     off: () => {},
   }),
+}));
+
+const played: string[] = [];
+vi.mock('../tabs/sound', async (importActual) => ({
+  ...(await importActual<typeof import('../tabs/sound')>()),
+  playSound: (kind: string) => played.push(kind),
+  unlockAudio: () => {},
 }));
 
 import Workspace from '../Workspace';
@@ -107,6 +118,7 @@ beforeEach(() => {
   });
   terminalMounts.length = 0;
   terminalUnmounts.length = 0;
+  played.length = 0;
   opened.length = 0;
   server.tabs = null;
   document.title = '';
@@ -141,6 +153,21 @@ describe('Workspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close tab Tasks' }));
     expect(screen.queryByRole('tab', { name: /Tasks/ })).toBeNull();
+  });
+
+  it('opens the Git tab from the dashboard and keeps it like the Tasks tab', async () => {
+    render(<Workspace />);
+    report([agent('a')]);
+    act(() => dashboard.onOpenGit?.());
+    expect(tab(/Git/)).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('git-lists')).toBeInTheDocument();
+    // An agent list without a "git" agent does not drop it.
+    report([agent('b')]);
+    expect(tab(/Git/)).toBeInTheDocument();
+    await act(async () => {});
+    expect(server.tabs).toContain('git');
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab Git' }));
+    expect(screen.queryByRole('tab', { name: /Git/ })).toBeNull();
   });
 
   it('opens a session in a tab and mounts only the active terminal', () => {
@@ -516,5 +543,51 @@ describe('Workspace', () => {
     render(<Workspace />);
     await act(async () => {});
     expect(server.tabs).toEqual(['a']);
+  });
+
+  describe('notification sound', () => {
+    const wait = (ms: number) => act(() => vi.advanceTimersByTime(ms));
+
+    it('plays once after a session waits a minute for the user', () => {
+      vi.useFakeTimers();
+      try {
+        render(<Workspace />);
+        report([agent('a', 'waiting_permission')]);
+        wait(55_000);
+        expect(played).toEqual([]);
+        wait(15_000);
+        expect(played).toEqual(['chime']);
+        wait(120_000);
+        expect(played).toEqual(['chime']);
+        // Answered, then waiting again: a new minute.
+        report([agent('a', 'working')]);
+        wait(5_000);
+        report([agent('a', 'waiting_permission')]);
+        wait(70_000);
+        expect(played).toEqual(['chime', 'chime']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('plays the chosen sound, and none when turned off', () => {
+      vi.useFakeTimers();
+      try {
+        localStorage.setItem('agentDashboard.sound', 'ping');
+        const { unmount } = render(<Workspace />);
+        report([agent('a', 'waiting_permission')]);
+        wait(70_000);
+        expect(played).toEqual(['ping']);
+        unmount();
+
+        localStorage.setItem('agentDashboard.sound', 'off');
+        render(<Workspace />);
+        report([agent('b', 'waiting_permission')]);
+        wait(70_000);
+        expect(played).toEqual(['ping']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

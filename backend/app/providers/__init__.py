@@ -24,9 +24,10 @@ async functions, each taking a ``Conn`` and an ``httpx`` client:
 They raise ``ProviderError`` with a message fit for the user.
 """
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
-
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -339,3 +340,178 @@ def _error_detail(response: httpx.Response) -> str:
         if isinstance(body.get(key), str):
             messages.append(body[key])
     return "; ".join(str(m) for m in messages)[:300]
+
+
+# ── Git tab ──────────────────────────────────────────────────
+# GitHub and Bitbucket clients (``github``, ``bitbucket``) share
+# the helpers above and expose these async functions, each
+# taking a ``Conn`` and an ``httpx`` client:
+#
+# - ``normalize_config(config) -> dict`` (sync): settings to save.
+# - ``check(conn, http) -> dict``: verifies the token; returns
+#   ``account`` (who it belongs to) and ``user_id``, saved with
+#   the settings.
+# - ``fetch(conn, http) -> (List[PullRequest], List[Commit])``.
+# - ``pr_context(conn, http, repo, number) -> PRContext``.
+# - ``post_comment(conn, http, repo, number, body, path, line)
+#   -> PostedComment``.
+
+# "owner/name" (GitHub) or "workspace/slug" (Bitbucket). Checked
+# before a repo name goes into an API path.
+REPO_NAME = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+# Commits older than this many days are not listed.
+COMMIT_DAYS = 14
+
+
+def web_url(value: Optional[str]) -> Optional[str]:
+    """Keeps only http(s) links, which the UI renders as links."""
+    if value and urlparse(value).scheme in ("http", "https"):
+        return value
+    return None
+
+
+def check_repo(repo: str) -> str:
+    """Refuses a repo name that could reach another API path.
+
+    Raises:
+        ProviderError: 404 for a malformed name.
+    """
+    if not REPO_NAME.fullmatch(repo) or ".." in repo:
+        raise ProviderError("No such repository.", 404)
+    return repo
+
+
+class _Linked(BaseModel):
+    """A thing with a web link; only http(s) links are kept."""
+
+    url: Optional[str] = None
+
+    @field_validator("url")
+    @classmethod
+    def _web_url(cls, value: Optional[str]) -> Optional[str]:
+        return web_url(value)
+
+
+class PullRequest(_Linked):
+    """A pull request as the Git tab shows it.
+
+    Attributes:
+        repo: ``owner/name`` or ``workspace/slug``.
+        number: Its number in the repository.
+        state: open, draft, merged or closed.
+        roles: Why it is on the user's list: they wrote it
+            (author), it is assigned to them (assignee), or their
+            review is requested (reviewer).
+        review: Where reviews stand: approved, changes_requested,
+            pending; None when nobody was asked.
+        checks: Combined CI status of the last commit; None when
+            unknown (always for Bitbucket).
+        updated_at: Last change, ISO 8601.
+    """
+
+    repo: str
+    number: int
+    title: str
+    author: Optional[str] = None
+    state: Literal["open", "draft", "merged", "closed"]
+    roles: List[Literal["author", "assignee", "reviewer"]] = Field(default_factory=list)
+    review: Optional[Literal["approved", "changes_requested", "pending"]] = None
+    checks: Optional[Literal["success", "failure", "pending"]] = None
+    source_branch: Optional[str] = None
+    target_branch: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class Commit(_Linked):
+    """A commit the user wrote.
+
+    Attributes:
+        message: First line of the commit message.
+        branch: Branch it was found on, when known.
+        date: When it was committed, ISO 8601.
+    """
+
+    repo: str
+    sha: str
+    message: str
+    branch: Optional[str] = None
+    date: Optional[str] = None
+
+
+class PRContext(BaseModel):
+    """What a review of a pull request is based on.
+
+    Attributes:
+        diff: Unified diff of the changes, as text.
+        head_sha: Last commit of the source branch.
+    """
+
+    repo: str
+    number: int
+    title: str
+    description: str = ""
+    source_branch: Optional[str] = None
+    target_branch: Optional[str] = None
+    head_sha: Optional[str] = None
+    diff: str
+
+
+class PostedComment(_Linked):
+    """A comment posted on a pull request.
+
+    Attributes:
+        url: Where to see it, when the host says.
+        inline: False when it was posted as a general comment
+            (no line given, or the line is not in the diff).
+    """
+
+    inline: bool
+
+
+def recent(date: Optional[str]) -> bool:
+    """Whether an ISO 8601 time falls in the last ``COMMIT_DAYS``
+    days. Unreadable or missing times count as old."""
+    try:
+        when = datetime.fromisoformat((date or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when >= datetime.now(timezone.utc) - timedelta(days=COMMIT_DAYS)
+
+
+def general_body(body: str, path: Optional[str], line: Optional[int]) -> str:
+    """A comment's text when it is posted as a general comment
+    instead of on a line: the place it refers to goes first."""
+    if not path:
+        return body
+    place = f"{path}:{line}" if line else path
+    return f"`{place}`\n\n{body}"
+
+
+def merge_roles(prs: List[PullRequest]) -> List[PullRequest]:
+    """One entry per pull request, with the roles of every copy.
+
+    A PR found by several searches (e.g. authored and assigned)
+    is listed once.
+    """
+    merged: Dict[Tuple[str, int], PullRequest] = {}
+    for pr in prs:
+        key = (pr.repo.lower(), pr.number)
+        if key in merged:
+            roles = merged[key].roles + [
+                r for r in pr.roles if r not in merged[key].roles
+            ]
+            merged[key] = merged[key].model_copy(update={"roles": roles})
+        else:
+            merged[key] = pr
+    return list(merged.values())
+
+
+def newest_commits(commits: List[Commit], limit: int = 100) -> List[Commit]:
+    """Drops repeats (same repo and SHA), newest first."""
+    seen: Dict[Tuple[str, str], Commit] = {}
+    for commit in commits:
+        seen.setdefault((commit.repo.lower(), commit.sha), commit)
+    ordered = sorted(seen.values(), key=lambda c: c.date or "", reverse=True)
+    return ordered[:limit]

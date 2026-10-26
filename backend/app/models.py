@@ -233,3 +233,73 @@ class UserPrefs(Base):
     email = Column(String, primary_key=True)
     # Interface language: "pt-BR" or "en".
     language = Column(String, nullable=True)
+
+
+class GitConnection(Base):
+    """One GitHub or Bitbucket Cloud account that a UI user
+    connected to the Git tab.
+
+    Like ``TaskConnection``: named by the user, token stored
+    encrypted (see ``secretbox``) and never sent to the browser.
+    """
+
+    __tablename__ = "git_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_email = Column(String, nullable=False, index=True)
+    # github or bitbucket.
+    provider = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    # Settings that are not secret (Bitbucket email and
+    # workspaces) plus who the token belongs to.
+    config_json = Column(JSON, nullable=False, default=dict)
+    secret_enc = Column(Text, nullable=False)
+    last_sync_at = Column(DateTime, nullable=True)
+    # Why the last read failed; None when it worked.
+    last_error = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    cache = relationship(
+        "GitCache",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class GitCache(Base):
+    """The pull requests and commits last read from a Git
+    connection, shown while the next read runs."""
+
+    __tablename__ = "git_cache"
+
+    connection_id = Column(Integer, ForeignKey("git_connections.id"), primary_key=True)
+    # Lists of PullRequest and Commit dicts (see providers).
+    prs_json = Column(JSON, nullable=False, default=list)
+    commits_json = Column(JSON, nullable=False, default=list)
+    synced_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    connection = relationship("GitConnection", back_populates="cache")
+
+
+class GitReview(Base):
+    """The last review Claude wrote of a pull request for a user.
+
+    Kept so reopening the review shows it again without paying
+    for a new one.
+    """
+
+    __tablename__ = "git_reviews"
+    __table_args__ = (UniqueConstraint("owner_email", "pr_id"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_email = Column(String, nullable=False, index=True)
+    # The pull request's ID in the Git tab, e.g.
+    # "github:3:owner/repo:42".
+    pr_id = Column(String, nullable=False)
+    # Last commit of the pull request when it was reviewed.
+    head_sha = Column(String, nullable=True)
+    model = Column(String, nullable=False)
+    # Summary, verdict, language and suggested comments.
+    result_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

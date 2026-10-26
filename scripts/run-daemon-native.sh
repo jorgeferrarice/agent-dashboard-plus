@@ -21,7 +21,13 @@ export NEW_PROJECTS_DIR="${NEW_PROJECTS_DIR:-$HOME/git}"
 # computer added with ./setup.sh --join runs no containers.
 if [[ -n "${CONTAINER_RUNTIME:-}" ]]; then
     if [[ $CONTAINER_RUNTIME == podman && "$(uname)" == Darwin ]]; then
-        podman machine start 2>/dev/null || true
+        # The VM processes (vfkit, gvproxy) stay in the process
+        # group of whoever starts them. When the daemon exits,
+        # launchd kills its job's whole process group, and with
+        # it the VM, the backend and the frontend. setpgrp gives
+        # the VM a group of its own so it outlives the daemon.
+        perl -e 'setpgrp(0, 0); exec @ARGV' podman machine start \
+            2>/dev/null || true
     fi
     ./scripts/compose.sh up -d >/dev/null 2>&1 || true
 fi

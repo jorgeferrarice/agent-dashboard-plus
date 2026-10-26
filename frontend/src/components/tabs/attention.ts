@@ -94,6 +94,55 @@ export function attentionOf(
   return done.has(agent.agent_id) ? 'done' : null;
 }
 
+/** How long a session waits for the user before the sound plays. */
+export const SOUND_DELAY_MS = 60_000;
+
+/** How long each session has needed attention, for the sound. */
+export interface SoundClock {
+  /** When each session started needing attention (ms). */
+  since: Map<string, number>;
+  /** Sessions whose sound already played in this wait. */
+  played: Set<string>;
+}
+
+/**
+ * Folds the sessions that need attention now into the clock and
+ * says whether the notification sound is due: some session has
+ * waited `delay` ms or more and has not sounded during this
+ * wait. Each wait sounds once; a session that stops needing
+ * attention starts over the next time. Several sessions coming
+ * due together make one sound.
+ *
+ * @param clock Updated in place.
+ * @param waiting Sessions that need attention now.
+ * @param now The current time (ms).
+ */
+export function soundDue(
+  clock: SoundClock,
+  waiting: Iterable<string>,
+  now: number,
+  delay = SOUND_DELAY_MS,
+): boolean {
+  const current = new Set(waiting);
+  for (const id of [...clock.since.keys()]) {
+    if (!current.has(id)) {
+      clock.since.delete(id);
+      clock.played.delete(id);
+    }
+  }
+  let due = false;
+  for (const id of current) {
+    const start = clock.since.get(id);
+    if (start === undefined) {
+      clock.since.set(id, now);
+    } else if (now - start >= delay && !clock.played.has(id)) {
+      clock.played.add(id);
+      due = true;
+    }
+  }
+  return due;
+}
+
 /** Tab label for a session: the name the user gave it, else
  *  tool and project. */
 export function tabLabel(agent: Agent): string {

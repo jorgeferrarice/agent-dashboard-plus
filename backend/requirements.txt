@@ -9,3 +9,4 @@ alembic
 authlib
 itsdangerous
 cryptography
+anthropic

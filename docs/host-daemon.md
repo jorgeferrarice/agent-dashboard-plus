@@ -329,6 +329,23 @@ The daemon has built-in error recovery for background tasks,
 but defense-in-depth restart ensures availability even for
 unhandled edge cases.
 
+## When the Dashboard Is Down
+
+The daemon does not need the dashboard to be up when it
+starts. If it cannot reach `DASHBOARD_URL`, it logs
+`Cannot reach the dashboard at ...` and tries again every 5
+seconds until the dashboard answers. Once connected, it
+reconnects by itself whenever the connection drops, for
+example while the backend restarts. The host card turns
+online again as soon as the daemon is back.
+
+On a Mac where the dashboard runs in Podman,
+`scripts/run-daemon-native.sh` starts the Podman VM in a
+process group of its own. Otherwise launchd, which stops the
+daemon's whole process group when the daemon exits, would
+take the VM (and the backend inside it) down with it on
+every daemon restart.
+
 ## Restarting the Daemon from the Dashboard
 
 Each host card has a **Restart** button. It asks the host's
@@ -382,6 +399,23 @@ For developers: the browser posts the file to
 `POST /agents/{agent_id}/files` (OIDC-protected), the backend relays it
 to the owning daemon as one `upload_file` Socket.IO call, and the
 daemon's `save_upload` writes it and answers with the path.
+
+## Chat View
+
+Claude sessions can be shown as a chat in the dashboard (see
+[Chat view](chat.md)). The daemon reads each Claude session's own
+conversation log, under `CLAUDE_CONFIG_DIR` or `~/.claude`, and
+sends new messages to the pages showing the chat
+(`chat_messages`). It also serves the images and videos those
+pages show (`read_media`), only from the session's folders. In a
+container, the Claude configuration directory must be mounted, as
+it already is for sign-in.
+
+The daemon removes Claude Code's own session variables
+(`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, ...) from the sessions
+it starts. Without that, a daemon started from a terminal inside
+Claude Code would start child sessions, which save no conversation
+log.
 
 ## Projects: Git Repositories and Plain Folders
 

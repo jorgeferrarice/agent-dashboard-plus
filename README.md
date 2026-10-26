@@ -48,6 +48,25 @@ A multi-host orchestration platform for AI coding agents — spawn, monitor, and
   dashboard. Encrypted per-user connections. See
   [Tasks tab](docs/tasks.md).
 
+**Git**
+- **Git tab** — Your pull requests (with state, reviews and CI),
+  the ones waiting for your review or assigned to you, and your
+  recent commits, from github.com and Bitbucket Cloud, refreshed
+  every 2 minutes. **Review PR** asks Claude for a review in the
+  language of the PR's description and suggests comments you edit
+  and post with one click; nothing is posted on its own. Needs
+  `ANTHROPIC_API_KEY` for reviews. See [Git tab](docs/git.md).
+
+**Chat**
+- **Chat view for Claude sessions** — A Claude Code session opens
+  as a chat: formatted text, tool calls you can unfold, images and
+  videos (files Claude makes, attachments, web media) shown in the
+  page, PDF previews, HTML pages and artifacts in a full-window
+  viewer, attachments by button, paste or drop, and the menus
+  Claude shows (permissions, questions) as buttons. Claude keeps
+  running in its terminal, one click away. See
+  [Chat view](docs/chat.md).
+
 **Language**
 - **Português e inglês** — The interface is in Portuguese (Brazil)
   by default, with English one click away in the settings cog; the
@@ -60,7 +79,9 @@ A multi-host orchestration platform for AI coding agents — spawn, monitor, and
   active tab streams output.
 - **Attention marks** — Tabs are marked when a session waits for a
   permission answer, finished working while unwatched, or ended;
-  optional browser notifications.
+  optional browser notifications, and a sound when a session has
+  waited for you for a minute (pick it or turn it off in the
+  settings cog).
 - **Rename sessions** — From the tab's context menu or the settings
   cog; the name is shared across browsers.
 - **Start in any folder** — Plain folders (not only git
@@ -284,7 +305,8 @@ Grok accounts get links to the same copies.
 - **Never expose the dashboard with `BYPASS_AUTH=true`** — not
   through a tunnel, a public IP or a shared network.
 - **`.env` holds secrets** and is git-ignored. `.env.example`
-  lists the keys with placeholders.
+  lists the keys with placeholders. That includes
+  `ANTHROPIC_API_KEY` for the Git tab's reviews.
 
 ## Overview
 
@@ -415,6 +437,19 @@ session cost.
   the Dashboard tab counts sessions that have no tab, and the bell
   turns on browser notifications for when the page is in the
   background.
+- **Notification sound** — When a session has needed you for a
+  minute (any of the marks above), the page plays a short sound,
+  once per wait. Pick the sound (Chime, Ping, Double beep, Soft),
+  hear it with ▶ or turn it off under **Notification sound** in the
+  settings cog; the choice is kept in each browser. Browsers only
+  let a page play sound after you click or type in it once, so the
+  first sound after a reload needs one interaction with the page
+  first. A background tab that has been hidden for a while may play
+  it up to a minute late, as browsers slow down timers there.
+  The sounds are made in the browser (Web Audio API), with no
+  audio files; the code is in `frontend/src/components/tabs/sound.ts`
+  and the one-minute rule in `soundDue`
+  (`frontend/src/components/tabs/attention.ts`).
 - **Send files to a session** — Drag files onto a terminal: they are
   saved on the session's host and their paths pasted at the prompt.
   Works with every tool. See

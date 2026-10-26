@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { attentionOf, stepAttention, tabLabel } from '../attention';
+import {
+  SOUND_DELAY_MS,
+  attentionOf,
+  soundDue,
+  stepAttention,
+  tabLabel,
+} from '../attention';
+import type { SoundClock } from '../attention';
 import type { Agent } from '../../../api';
 
 const agent = (id: string, status?: string, extra = {}): Agent => ({
@@ -112,5 +119,36 @@ describe('tabLabel', () => {
         agent('a', 'idle', { git_project: 'vibn', session_name: 'login fix' }),
       ),
     ).toBe('login fix');
+  });
+});
+
+describe('soundDue', () => {
+  const clock = (): SoundClock => ({ since: new Map(), played: new Set() });
+
+  it('sounds once per wait, after the delay', () => {
+    const c = clock();
+    expect(soundDue(c, ['a'], 0)).toBe(false);
+    expect(soundDue(c, ['a'], SOUND_DELAY_MS - 1)).toBe(false);
+    expect(soundDue(c, ['a'], SOUND_DELAY_MS)).toBe(true);
+    expect(soundDue(c, ['a'], SOUND_DELAY_MS * 5)).toBe(false);
+  });
+
+  it('starts over when a session stops needing attention', () => {
+    const c = clock();
+    soundDue(c, ['a'], 0);
+    expect(soundDue(c, ['a'], SOUND_DELAY_MS)).toBe(true);
+    expect(soundDue(c, [], SOUND_DELAY_MS + 1)).toBe(false);
+    expect(c.since.size).toBe(0);
+    soundDue(c, ['a'], 100_000);
+    expect(soundDue(c, ['a'], 100_000 + SOUND_DELAY_MS)).toBe(true);
+  });
+
+  it('makes one sound for sessions coming due together', () => {
+    const c = clock();
+    soundDue(c, ['a', 'b'], 0);
+    expect(soundDue(c, ['a', 'b'], SOUND_DELAY_MS)).toBe(true);
+    // A later session waits its own minute.
+    expect(soundDue(c, ['a', 'b', 'c'], SOUND_DELAY_MS + 1)).toBe(false);
+    expect(soundDue(c, ['a', 'b', 'c'], 2 * SOUND_DELAY_MS + 1)).toBe(true);
   });
 });

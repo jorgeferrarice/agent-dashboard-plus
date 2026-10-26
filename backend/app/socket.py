@@ -16,8 +16,18 @@ from itsdangerous import TimestampSigner, BadSignature
 from . import database, models
 from .auth import is_allowed
 
+# Largest Socket.IO message accepted from a client. The default
+# (1 MB) is too small for what daemons answer: pieces of images
+# and videos for the chat view (up to MEDIA_CHUNK_BYTES, 8 MB, in
+# agent/host_daemon.py) and groups of chat messages.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
 # Initialize the AsyncServer with ASGI support and CORS
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+sio = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins="*",
+    max_http_buffer_size=MAX_MESSAGE_BYTES,
+)
 
 # Socket.IO session ID of each connected host daemon, keyed by
 # host ID. Needed for request/response calls to one daemon
@@ -73,6 +83,16 @@ async def notify_tasks_changed(email: str) -> None:
         email: The user's login email.
     """
     await sio.emit("tasks_updated", {}, room=user_room(email), namespace="/terminal")
+
+
+async def notify_git_changed(email: str) -> None:
+    """Tells a user's open pages that their Git tab's pull
+    requests or commits changed, so it reloads them.
+
+    Args:
+        email: The user's login email.
+    """
+    await sio.emit("git_updated", {}, room=user_room(email), namespace="/terminal")
 
 
 @sio.on("connect", namespace="/terminal")
@@ -144,9 +164,13 @@ async def disconnect(sid):
         if session.get("is_host"):
             host_id = session.get("host_id")
             # A reconnecting daemon may already have registered
-            # a newer SID; only drop the entry if it is ours.
-            if host_sids.get(host_id) == sid:
-                del host_sids[host_id]
+            # a newer SID: the old connection's drop is noticed
+            # only after its ping timeout, seconds after the new
+            # one came up. The host is still online then, so
+            # leave both the entry and its status alone.
+            if host_sids.get(host_id) not in (None, sid):
+                return
+            host_sids.pop(host_id, None)
             db = next(database.get_db())
             try:
                 host = db.query(models.Host).filter(models.Host.id == host_id).first()
@@ -227,6 +251,97 @@ async def handle_leave_room(sid, data):
     agent_id = (data or {}).get("room")
     if agent_id:
         await sio.leave_room(sid, agent_id, namespace="/terminal")
+
+
+def chat_room(agent_id: str) -> str:
+    """The room of a session's chat viewers. It is not the
+    agent's own room, so opening the chat does not replay the
+    terminal's output."""
+    return f"chat:{agent_id}"
+
+
+def host_sid_of(agent_id: str):
+    """The Socket.IO session of the daemon running a session, or
+    None when the session is unknown or its host is offline."""
+    db = database.SessionLocal()
+    try:
+        agent = db.query(models.Agent).filter(models.Agent.agent_id == agent_id).first()
+        return host_sids.get(agent.host_id) if agent else None
+    finally:
+        db.close()
+
+
+async def _is_host(sid) -> bool:
+    """Whether a connection is a host daemon's."""
+    session = await sio.get_session(sid, namespace="/terminal")
+    return bool(session and session.get("is_host"))
+
+
+@sio.on("chat_join", namespace="/terminal")
+async def handle_chat_join(sid, data):
+    """
+    Opens a session's chat view: the client gets the session's
+    new chat messages from now on, and the whole conversation
+    once, from the daemon.
+    data: {'agent_id': '...'}
+    """
+    agent_id = (data or {}).get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return
+    await sio.enter_room(sid, chat_room(agent_id), namespace="/terminal")
+    host_sid = host_sid_of(agent_id)
+    if host_sid:
+        await sio.emit(
+            "chat_history",
+            {"agent_id": agent_id, "requester": sid},
+            to=host_sid,
+            namespace="/terminal",
+        )
+    else:
+        # Unknown session or host offline: an empty conversation,
+        # so the view stops waiting.
+        await sio.emit(
+            "chat_messages",
+            {"agent_id": agent_id, "messages": [], "replace": True},
+            to=sid,
+            namespace="/terminal",
+        )
+
+
+@sio.on("chat_leave", namespace="/terminal")
+async def handle_chat_leave(sid, data):
+    """
+    Closes a session's chat view: the client stops getting its
+    chat messages.
+    data: {'agent_id': '...'}
+    """
+    agent_id = (data or {}).get("agent_id")
+    if isinstance(agent_id, str) and agent_id:
+        await sio.leave_room(sid, chat_room(agent_id), namespace="/terminal")
+
+
+@sio.on("chat_messages", namespace="/terminal")
+async def handle_chat_messages(sid, data):
+    """
+    Relays chat messages from a daemon to the session's chat
+    viewers, or to the one viewer that asked for the whole
+    conversation (``requester``). Only daemons may send them.
+    data: {'agent_id', 'messages', 'replace', 'requester'?}
+    """
+    data = data or {}
+    agent_id = data.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id or not await _is_host(sid):
+        return
+    await sio.emit(
+        "chat_messages",
+        {
+            "agent_id": agent_id,
+            "messages": data.get("messages") or [],
+            "replace": bool(data.get("replace")),
+        },
+        to=data.get("requester") or chat_room(agent_id),
+        namespace="/terminal",
+    )
 
 
 @sio.on("request_projects", namespace="/terminal")

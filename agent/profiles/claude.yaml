@@ -13,6 +13,16 @@ env:
   OTEL_METRICS_EXPORTER: "otlp"
   OTEL_LOGS_EXPORTER: "otlp"
   OTEL_EXPORTER_OTLP_PROTOCOL: "http/json"
+  # Send log events every second instead of every 5: they
+  # carry session.id, which the chat view needs to find the
+  # conversation (see "chat" below).
+  OTEL_LOGS_EXPORT_INTERVAL: "1000"
+
+# Chat view: the dashboard shows the conversation as web
+# messages by reading Claude's own transcript
+# (<config dir>/projects/<folder>/<session id>.jsonl). See
+# docs/chat.md.
+chat: claude
 
 # No auth gate — Claude Code supports API key, OAuth,
 # and Vertex AI. The daemon can't detect all auth
@@ -65,9 +75,10 @@ telemetry:
     unit: seconds
 
 permission_patterns:
+  # No "\\u2610" (☐): it also marks the items of Claude's to-do
+  # lists. Questions show a numbered menu, matched below.
   - "Do you want to proceed"
   - "\\u276f\\s+\\d+\\."
-  - "\\u2610"
   - "Skip interview and plan"
 
 # Build-time provisioning metadata

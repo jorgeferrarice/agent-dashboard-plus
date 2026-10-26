@@ -11,6 +11,7 @@ import {
   Bell,
   BellOff,
   Columns2,
+  GitPullRequest,
   LayoutDashboard,
   ListTodo,
   Rows2,
@@ -23,18 +24,22 @@ import { getSocket } from '../socket';
 import Dashboard from './Dashboard';
 import Terminal from './Terminal';
 import TasksView from './tasks/TasksView';
+import GitView from './git/GitView';
 import ErrorBoundary from './ErrorBoundary';
 import ThemeSelector from './ThemeSelector';
 import LanguageSelector from './LanguageSelector';
+import SoundSelector from './SoundSelector';
+import { loadSound, playSound, unlockAudio } from './tabs/sound';
 import { useI18n } from '../i18n';
 import { openTerminalWindow } from './terminalWindow';
 import {
   ATTENTION_LABELS,
   attentionOf,
+  soundDue,
   stepAttention,
   tabLabel,
 } from './tabs/attention';
-import type { Attention, AttentionEvent } from './tabs/attention';
+import type { Attention, AttentionEvent, SoundClock } from './tabs/attention';
 
 /** ID of the fixed first tab. */
 const DASHBOARD = 'dashboard';
@@ -42,9 +47,16 @@ const DASHBOARD = 'dashboard';
  *  be moved, closed and reopened like them) but shows the task
  *  board instead of a terminal. */
 export const TASKS = 'tasks';
-/** Label for a tab the workspace knows only by ID. The Tasks
- *  tab's label is translated where it is shown. */
-const defaultLabel = (id: string) => (id === TASKS ? 'Tasks' : 'session');
+/** ID of the Git tab: pull requests and commits, handled like
+ *  the Tasks tab. */
+export const GIT = 'git';
+/** Whether a tab shows a page of the dashboard (Tasks, Git)
+ *  instead of a session's terminal. */
+const isPage = (id: string) => id === TASKS || id === GIT;
+/** Label for a tab the workspace knows only by ID. Page tabs'
+ *  labels are translated where they are shown. */
+const defaultLabel = (id: string) =>
+  id === TASKS ? 'Tasks' : id === GIT ? 'Git' : 'session';
 const STORAGE_KEY = 'agentDashboard.tabs';
 const BASE_TITLE = 'Agent Dashboard';
 
@@ -112,6 +124,9 @@ const ATTENTION_DOT: Record<Attention, string> = {
 
 /** Whether the user is looking at this page right now. */
 const pageInFocus = () => !document.hidden && document.hasFocus();
+
+/** How often (ms) waiting sessions are checked for the sound. */
+const SOUND_TICK_MS = 5_000;
 
 const notificationsSupported = () => typeof Notification !== 'undefined';
 
@@ -241,6 +256,9 @@ const TabNameInput: React.FC<{
  */
 const Workspace: React.FC = () => {
   const { t } = useI18n();
+  /** Translated name of a page tab; undefined for sessions. */
+  const pageLabel = (id: string) =>
+    id === TASKS ? t('tabs.tasks') : id === GIT ? t('tabs.git') : undefined;
   const socket = useMemo(() => getSocket(), []);
   const [stored] = useState(loadStoredTabs);
   const [tabs, setTabs] = useState<SessionTab[]>(stored.tabs);
@@ -459,7 +477,7 @@ const Workspace: React.FC = () => {
     const next = current
       .filter(
         (t) =>
-          t.id === TASKS ||
+          isPage(t.id) ||
           byId.has(t.id) ||
           ended.has(t.id) ||
           !knownRef.current.has(t.id),
@@ -593,18 +611,52 @@ const Workspace: React.FC = () => {
     attentionOf(agentsById.get(id), done, ended.has(id) && !endedSeen.has(id));
 
   // Sessions without a tab that need attention still count
-  // toward the page title.
+  // toward the page title (and the sound).
   const openIds = new Set(tabs.map((t) => t.id));
-  const untabbedCount = agents.filter(
-    (a) => !openIds.has(a.agent_id) && attentionOf(a, done, false),
-  ).length;
-  const attentionCount =
-    untabbedCount + tabs.filter((t) => tabAttention(t.id)).length;
+  const attentionIds = [
+    ...tabs.filter((t) => tabAttention(t.id)).map((t) => t.id),
+    ...agents
+      .filter((a) => !openIds.has(a.agent_id) && attentionOf(a, done, false))
+      .map((a) => a.agent_id),
+  ];
+  const attentionCount = attentionIds.length;
 
   useEffect(() => {
     document.title =
       attentionCount > 0 ? `(${attentionCount}) ${BASE_TITLE}` : BASE_TITLE;
   }, [attentionCount]);
+
+  // Notification sound: once a session has needed attention for
+  // a minute (see soundDue), unless the user turned it off.
+  const attentionRef = useRef<string[]>([]);
+  useEffect(() => {
+    attentionRef.current = attentionIds;
+  });
+  const soundClock = useRef<SoundClock>({
+    since: new Map(),
+    played: new Set(),
+  });
+  useEffect(() => {
+    const tick = () => {
+      const due = soundDue(
+        soundClock.current,
+        attentionRef.current,
+        Date.now(),
+      );
+      const sound = loadSound();
+      if (due && sound !== 'off') playSound(sound);
+    };
+    const timer = window.setInterval(tick, SOUND_TICK_MS);
+    // Browsers keep a page silent until the user clicks or types
+    // in it; any click or key switches the sound on.
+    window.addEventListener('pointerdown', unlockAudio, true);
+    window.addEventListener('keydown', unlockAudio, true);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('pointerdown', unlockAudio, true);
+      window.removeEventListener('keydown', unlockAudio, true);
+    };
+  }, []);
 
   /**
    * Opens the inline name editor for a tab, from a menu item.
@@ -692,7 +744,7 @@ const Workspace: React.FC = () => {
           {tabs.map((tab, i) => {
             const attention = tabAttention(tab.id);
             const isEnded = ended.has(tab.id);
-            const label = tab.id === TASKS ? t('tabs.tasks') : tab.label;
+            const label = pageLabel(tab.id) ?? tab.label;
             const selected = active === tab.id;
             return (
               <div
@@ -724,8 +776,8 @@ const Workspace: React.FC = () => {
                   setDropTarget(null);
                 }}
                 onContextMenu={(e) => {
-                  // The Tasks tab has nothing to rename.
-                  if (tab.id === TASKS) return;
+                  // Page tabs have nothing to rename.
+                  if (isPage(tab.id)) return;
                   e.preventDefault();
                   setMenuFor(tab.id);
                   showPopoverAt('tab-menu', e.clientX, e.clientY);
@@ -770,6 +822,9 @@ const Workspace: React.FC = () => {
                     {tab.id === TASKS && (
                       <ListTodo size={14} className="shrink-0" />
                     )}
+                    {tab.id === GIT && (
+                      <GitPullRequest size={14} className="shrink-0" />
+                    )}
                     {attention && (
                       <span
                         role="status"
@@ -778,7 +833,7 @@ const Workspace: React.FC = () => {
                       />
                     )}
                     <span
-                      className={`truncate ${isEnded ? 'line-through opacity-60' : ''} ${tab.id === TASKS ? 'font-sans font-semibold' : ''}`}
+                      className={`truncate ${isEnded ? 'line-through opacity-60' : ''} ${isPage(tab.id) ? 'font-sans font-semibold' : ''}`}
                     >
                       {label}
                     </span>
@@ -788,7 +843,7 @@ const Workspace: React.FC = () => {
                   onClick={() => closeTab(tab.id)}
                   aria-label={t('tabs.close', { label })}
                   title={
-                    tab.id === TASKS
+                    isPage(tab.id)
                       ? t('tabs.closeTitle')
                       : t('tabs.closeSessionTitle')
                   }
@@ -907,7 +962,14 @@ const Workspace: React.FC = () => {
             {t('settings.language')}
           </p>
           <LanguageSelector />
-          {activeTab && activeTab.id !== TASKS && (
+          <p className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            {t('settings.sound')}
+          </p>
+          <SoundSelector />
+          <p className="mt-1.5 max-w-56 text-[11px] text-slate-500">
+            {t('settings.soundHint')}
+          </p>
+          {activeTab && !isPage(activeTab.id) && (
             <>
               <p className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
                 {t('settings.session')}
@@ -936,6 +998,7 @@ const Workspace: React.FC = () => {
             onAttach={openTab}
             onAgentsChange={handleAgentsChange}
             onOpenTasks={() => openTab(TASKS)}
+            onOpenGit={() => openTab(GIT)}
           />
         </ErrorBoundary>
       </div>
@@ -950,7 +1013,7 @@ const Workspace: React.FC = () => {
             <div
               key={pane.id}
               role="tabpanel"
-              aria-label={pane.id === TASKS ? t('tabs.tasks') : pane.label}
+              aria-label={pageLabel(pane.id) ?? pane.label}
               // Clicking or typing in a pane makes it the one
               // tab clicks land in.
               onMouseDownCapture={() => activate(pane.id)}
@@ -965,11 +1028,17 @@ const Workspace: React.FC = () => {
             >
               <ErrorBoundary
                 where={
-                  pane.id === TASKS ? 'Tasks tab' : `Session tab ${pane.id}`
+                  pane.id === TASKS
+                    ? 'Tasks tab'
+                    : pane.id === GIT
+                      ? 'Git tab'
+                      : `Session tab ${pane.id}`
                 }
               >
                 {pane.id === TASKS ? (
                   <TasksView />
+                ) : pane.id === GIT ? (
+                  <GitView />
                 ) : (
                   <Terminal
                     agentId={pane.id}

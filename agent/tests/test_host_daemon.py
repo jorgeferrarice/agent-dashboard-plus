@@ -18,6 +18,7 @@ from dataclasses import replace
 from unittest.mock import patch, mock_open
 
 import pytest
+import socketio
 import yaml
 
 from agent.host_daemon import MAX_UPLOAD_BYTES, HostDaemon, _split_utf8
@@ -298,6 +299,29 @@ class TestUpdateTelemetry:
 
 
 # ── D. _resolve_agent_id ─────────────────────────────────────
+
+
+class TestNotePermissionPrompt:
+    """_note_permission_prompt keeps a match only while it is fresh."""
+
+    def test_match_marks_a_candidate(self, daemon):
+        info = {}
+        daemon._note_permission_prompt(info, "Do you want to proceed?\n", 10.0)
+        assert info["permission_candidate"] == 10.0
+
+    def test_later_output_clears_an_old_match(self, daemon):
+        """A menu in Claude's text, then more work: no prompt left."""
+        info = {}
+        daemon._note_permission_prompt(info, "\u276f 1. Yes\n", 10.0)
+        daemon._note_permission_prompt(info, "\u2733 Working\u2026", 10.5)
+        assert info["permission_candidate"] == 10.0
+        daemon._note_permission_prompt(info, "\u2733 Working\u2026", 13.0)
+        assert info["permission_candidate"] == 0
+
+    def test_todo_list_is_not_a_prompt(self, daemon):
+        info = {}
+        daemon._note_permission_prompt(info, "  \u2610 Write the tests\n", 10.0)
+        assert not info.get("permission_candidate")
 
 
 class TestResolveAgentId:
@@ -1444,11 +1468,22 @@ class TestSpawnCommand:
         left in the daemon's or tmux server's environment."""
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/home/u/.claude-infinite")
         argv = self._tmux_argv(daemon, "claude", session_mode="new")
-        assert argv[argv.index("env") + 1 : argv.index("env") + 3] == [
-            "-u",
-            "CLAUDE_CONFIG_DIR",
-        ]
+        assert argv[argv.index("CLAUDE_CONFIG_DIR") - 1] == "-u"
         assert not any(a.startswith("CLAUDE_CONFIG_DIR=") for a in argv)
+
+    def test_parent_claude_session_is_not_inherited(self, daemon, monkeypatch):
+        """A daemon started inside a Claude Code session does not
+        make its sessions child sessions (they would stop saving
+        the transcript the chat view reads)."""
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        argv = self._tmux_argv(daemon, "claude", session_mode="new")
+        for name in ("CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"):
+            assert argv[argv.index(name) - 1] == "-u"
+            assert not any(a.startswith(f"{name}=") for a in argv)
+        # Real settings still pass.
+        assert "CLAUDE_CODE_USE_VERTEX=1" in argv
 
     def test_variant_keeps_its_config_dir(self, daemon):
         """An account variant still gets its own directory."""
@@ -1771,3 +1806,38 @@ class TestRunTask:
             return [getattr(daemon, n).cancelled() for n in names]
 
         assert all(asyncio.run(main()))
+
+
+class TestConnectToHub:
+    """The daemon waits for a hub that is down instead of exiting."""
+
+    def test_retries_until_hub_answers(self, daemon, monkeypatch):
+        """Failed attempts are retried; the first success returns."""
+        attempts = []
+
+        async def fake_connect(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise socketio.exceptions.ConnectionError("refused")
+
+        async def no_wait(_):
+            return None
+
+        monkeypatch.setattr(daemon.sio, "connect", fake_connect)
+        monkeypatch.setattr(asyncio, "sleep", no_wait)
+        asyncio.run(daemon._connect_to_hub())
+        assert len(attempts) == 3
+
+    def test_stop_ends_the_wait(self, daemon, monkeypatch):
+        """stop() while the hub is down ends the retry loop."""
+
+        async def fake_connect(*args, **kwargs):
+            raise socketio.exceptions.ConnectionError("refused")
+
+        async def stop_on_wait(_):
+            daemon.running = False
+
+        monkeypatch.setattr(daemon.sio, "connect", fake_connect)
+        monkeypatch.setattr(asyncio, "sleep", stop_on_wait)
+        asyncio.run(daemon._connect_to_hub())
+        assert not daemon.running

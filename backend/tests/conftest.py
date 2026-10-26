@@ -1,6 +1,6 @@
-"""Shared fixtures for the Tasks tab tests.
+"""Shared fixtures for the Tasks and Git tab tests.
 
-The Tasks tests use their own SQLite file and put back the
+These tests use their own SQLite file and put back the
 dependency overrides the other test modules installed, so test
 modules can run in one pytest session in any order.
 """
@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.app import providers, tasks
+from backend.app import git, providers, tasks
 from backend.app.auth import get_current_user
 from backend.app.database import Base, get_db
 from backend.app.main import app, fastapi_app
@@ -42,6 +42,8 @@ def tasks_app(monkeypatch):
     test modules' overrides are put back afterwards. Manual
     refreshes read every time (no cooldown)."""
     monkeypatch.setattr(tasks, "REFRESH_COOLDOWN", 0)
+    monkeypatch.setattr(git, "REFRESH_COOLDOWN", 0)
+    monkeypatch.setattr(git, "_retry_at", {})
     saved = dict(fastapi_app.dependency_overrides)
     Base.metadata.create_all(bind=engine)
     fastapi_app.dependency_overrides[get_db] = _db
